@@ -1,0 +1,93 @@
+# News generator stack.
+#
+# Native on the host (not in this stack): ComfyUI on its GPU box. Everything the app
+# itself needs (Python, ffmpeg, the built admin UI) is inside the image.
+#
+# Configuration comes from .env, passed through wholesale. Service URLs in .env point at
+# wherever those services live (LAN, VPN, or host.docker.internal for the Docker host);
+# only SearXNG is overridden to the bundled container.
+#
+#   docker compose up -d                 app + searxng
+#   docker compose --profile mcp up -d   also a separate MCP-only instance on :8001
+
+services:
+  app:
+    build: .
+    image: ghcr.io/beaudamore/news-generator-generic:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080
+      DATA_DIRECTORY: /app/data
+      LOG_DIR: /app/logs
+      NEWS_OUTPUT_DIRECTORY: /app/output
+      AVATAR_STORAGE_PATH: /app/assets/avatars
+      VOICE_STORAGE_PATH: /app/assets/voices
+    volumes:
+      - app-data:/app/data
+      - app-logs:/app/logs
+      - ./output:/app/output
+      - ./assets/avatars:/app/assets/avatars
+      - ./assets/voices:/app/assets/voices
+    depends_on:
+      - searxng
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - news-generator-net
+
+  # Optional: a second instance of the same image serving only the API and MCP over HTTP,
+  # with no worker and no scheduler, so agent traffic never competes with renders.
+  mcp:
+    profiles: ["mcp"]
+    image: ghcr.io/beaudamore/news-generator-generic:latest
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080
+      DATA_DIRECTORY: /app/data
+      LOG_DIR: /app/logs
+      NEWS_OUTPUT_DIRECTORY: /app/output
+      AVATAR_STORAGE_PATH: /app/assets/avatars
+      VOICE_STORAGE_PATH: /app/assets/voices
+      NEWS_WORKER_ENABLED: "false"
+      NEWS_SCHEDULER_ENABLED: "false"
+    volumes:
+      - app-data:/app/data
+      - app-logs:/app/logs
+      - ./output:/app/output
+      - ./assets/avatars:/app/assets/avatars
+      - ./assets/voices:/app/assets/voices
+    depends_on:
+      - app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - news-generator-net
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8888:8080"
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8888/
+    volumes:
+      - searxng-data:/etc/searxng
+    restart: unless-stopped
+    networks:
+      - news-generator-net
+
+volumes:
+  app-data:
+  app-logs:
+  searxng-data:
+
+networks:
+  news-generator-net:
+    name: news-generator-net

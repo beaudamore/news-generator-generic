@@ -1,0 +1,72 @@
+# Audio files
+*.aac
+*.aiff
+*.alac
+*.amr
+*.flac
+*.m4a
+*.mp3
+*.ogg
+*.opus
+*.wav
+*.wma
+
+# Video files
+*.avi
+*.flv
+*.m4v
+*.mkv
+*.mov
+*.mp4
+*.mpeg
+*.mpg
+*.webm
+*.wmv
+
+# Image files
+*.avif
+*.bmp
+*.gif
+*.heic
+*.heif
+*.jpeg
+*.jpg
+*.png
+*.svg
+*.tif
+*.tiff
+*.webp
+
+# Generated media directories
+assets/avatars/
+images/
+output/
+video/
+videos/
+
+# Local environment
+.env
+.env.base
+
+# Local database and runtime data
+data/
+logs/
+
+# Admin UI build
+web/node_modules/
+web/dist/
+!web/public/*.svg
+
+# Local Python environment
+.venv/
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
