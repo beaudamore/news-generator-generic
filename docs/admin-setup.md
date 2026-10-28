@@ -12,6 +12,7 @@ The app itself is CPU-only and portable. All heavy work happens on external HTTP
 | TTS server (OpenAI-compatible, Qwen3-TTS) | `TTS_OPENAI_BASE_URL`, `TTS_OPENAI_MODEL` | narration audio and the voice library |
 | ComfyUI (video) | `VIDEO_COMFYUI_BASE_URL`, `VIDEO_COMFYUI_WORKFLOW` | LTX-2.3 talking-head video; the workflow must be the official IA2V template, see README "Video Workflow" |
 | ComfyUI (avatar, optional) | `AVATAR_COMFYUI_BASE_URL` | Z-Image-Turbo avatar generation |
+| ComfyUI helper node (optional) | `COMFYUI_AUTO_DOWNLOAD_MODELS`, `COMFYUI_HF_TOKEN` | lets the app download missing model files onto each ComfyUI host; install `comfyui-helper-node/news_generator_helper` into that host's `custom_nodes/`, see README "ComfyUI Model Downloads" |
 
 ## Phase 0 — Python environment
 
@@ -199,7 +200,14 @@ curl -X POST http://localhost:8000/stages/video \
 # expect video_url, video_duration_seconds
 ```
 
-This is the slow gate (minutes on a capable GPU). Before blaming the app, run the workflow JSON manually in the ComfyUI UI — see the ComfyUI Validation Checklist in the README.
+This is the slow gate (minutes on a capable GPU). Before running it, check the host has every model file the template names and let the app fetch the missing ones:
+
+```bash
+.venv/bin/python scripts/ensure_comfyui_models.py                     # audit: present / MISSING per file, missing node packs
+.venv/bin/python scripts/ensure_comfyui_models.py --download --wait   # needs comfyui-helper-node installed on the host
+```
+
+Before blaming the app for anything else, run the workflow JSON manually in the ComfyUI UI — see the ComfyUI Validation Checklist in the README.
 
 The video stage validates the template before queuing. An error stage `video` whose message names `LTXVReferenceAudio`, `LTXVEmptyLatentAudio`, missing placeholders, or `LTXVAudioVAEEncode` means the wrong template is configured; fix `VIDEO_COMFYUI_WORKFLOW`, do not bypass the check. `output/<run_id>/run.log` records the validation result and every other stage.
 

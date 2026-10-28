@@ -1,0 +1,197 @@
+{
+  "_comment": "Download source for every model file the templates in this folder reference. ComfyUI's API-format export drops the download metadata the UI export carries, so it lives here. Keys are the exact filenames the templates use; folder is the ComfyUI models/ subfolder (diffusion_models also covers models/unet). sha256 is set only where a Hugging Face blob page confirmed it; size_bytes only where the exact byte count is known. Verify with: python scripts/ensure_comfyui_models.py --check-manifest",
+  "models": {
+    "ltx-2.3-22b-dev-fp8.safetensors": {
+      "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+      "folder": "checkpoints",
+      "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450",
+      "size_display": "29.1 GB",
+      "source": "Lightricks/LTX-2.3-fp8",
+      "note": "CUDA templates (working, extend). Separate repo from Lightricks/LTX-2.3."
+    },
+    "ltx-2.3-22b-dev.safetensors": {
+      "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
+      "folder": "checkpoints",
+      "size_display": "46.1 GB",
+      "source": "Lightricks/LTX-2.3",
+      "note": "bf16 checkpoint for video_ltx2_3_ia2v-extend-mac.json; does not fit a 128 GB Mac through the second pass, see docs/mac/."
+    },
+    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors": {
+      "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "folder": "latent_upscale_models",
+      "size_display": "996 MB",
+      "source": "Lightricks/LTX-2.3",
+      "note": "LatentUpscaleModelLoader reads models/latent_upscale_models/, not models/upscale_models/."
+    },
+    "ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/ltx-2.3/resolve/main/split_files/loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors",
+      "folder": "loras",
+      "source": "Comfy-Org/ltx-2.3",
+      "note": "Repo Comfy-Org/ltx-2.3 (with the dot)."
+    },
+    "gemma_3_12B_it_fp4_mixed.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+      "folder": "text_encoders",
+      "sha256": "aaca463d11e6d8d2a4bdb0d6299214c15ef78a3f73e0ef8113d5a9d0219b3f6d",
+      "size_display": "9.45 GB",
+      "source": "Comfy-Org/ltx-2",
+      "note": "CUDA only: MPS has no float8/fp4."
+    },
+    "gemma_3_12B_it.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
+      "folder": "text_encoders",
+      "sha256": "56eaa964a0d9325d2dc9ecaf7759bfaf0fac78ae36c789bed6e03e275a3729ec",
+      "size_display": "24.4 GB",
+      "source": "Comfy-Org/ltx-2",
+      "note": "bf16 text encoder for the Mac bf16 template."
+    },
+    "gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/loras/gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors",
+      "folder": "loras",
+      "source": "Comfy-Org/ltx-2",
+      "note": "Repo Comfy-Org/ltx-2 (no dot). Shared by every LTX template."
+    },
+    "ltx-2.3-22b-dev-Q8_0.gguf": {
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/main/ltx-2.3-22b-dev-Q8_0.gguf",
+      "folder": "diffusion_models",
+      "size_display": "22.8 GB",
+      "source": "unsloth/LTX-2.3-GGUF",
+      "note": "Needs the ComfyUI-GGUF node pack (UnetLoaderGGUF). Lands in models/diffusion_models (same folder set as models/unet)."
+    },
+    "ltx-2.3-22b-dev_video_vae.safetensors": {
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/main/vae/ltx-2.3-22b-dev_video_vae.safetensors",
+      "folder": "vae",
+      "size_display": "1.45 GB",
+      "source": "unsloth/LTX-2.3-GGUF"
+    },
+    "ltx-2.3-22b-dev_audio_vae.safetensors": {
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/main/vae/ltx-2.3-22b-dev_audio_vae.safetensors",
+      "folder": "vae",
+      "size_display": "365 MB",
+      "source": "unsloth/LTX-2.3-GGUF"
+    },
+    "ltx-2.3-22b-dev_embeddings_connectors.safetensors": {
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/main/text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+      "folder": "text_encoders",
+      "size_display": "2.31 GB",
+      "source": "unsloth/LTX-2.3-GGUF"
+    },
+    "gemma-3-12b-it-Q8_0.gguf": {
+      "url": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q8_0.gguf",
+      "folder": "text_encoders",
+      "size_display": "12.5 GB",
+      "source": "unsloth/gemma-3-12b-it-GGUF",
+      "note": "Needs ComfyUI-GGUF (DualCLIPLoaderGGUF, Gemma 3 support since January 2026). The mmproj file is not needed."
+    },
+    "z_image_turbo_bf16.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors",
+      "folder": "diffusion_models",
+      "sha256": "2407613050b809ffdff18a4ac99af83ea6b95443ecebdf80e064a79c825574a6",
+      "size_display": "12.3 GB",
+      "source": "Comfy-Org/z_image_turbo"
+    },
+    "z_image_turbo_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_int8_convrot.safetensors",
+      "folder": "diffusion_models",
+      "size_display": "6.2 GB",
+      "source": "Comfy-Org/z_image_turbo"
+    },
+    "qwen_3_4b.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
+      "folder": "text_encoders",
+      "size_display": "8.04 GB",
+      "source": "Comfy-Org/z_image_turbo"
+    },
+    "qwen_3_4b_fp8_mixed.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b_fp8_mixed.safetensors",
+      "folder": "text_encoders",
+      "size_display": "5.63 GB",
+      "source": "Comfy-Org/z_image_turbo"
+    },
+    "ae.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors",
+      "folder": "vae",
+      "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+      "size_display": "335 MB",
+      "source": "Comfy-Org/z_image_turbo",
+      "note": "Same Flux-style AE as the Flux VAE of the same name."
+    },
+    "qwen_image_2512_fp8_e4m3fn.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_2512_fp8_e4m3fn.safetensors",
+      "folder": "diffusion_models",
+      "size_display": "20.4 GB",
+      "source": "Comfy-Org/Qwen-Image_ComfyUI",
+      "note": "The 2512 files live in the Qwen-Image_ComfyUI repo, not a separate 2512 repo."
+    },
+    "qwen_2.5_vl_7b_fp8_scaled.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "folder": "text_encoders",
+      "sha256": "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4",
+      "size_display": "9.38 GB",
+      "source": "Comfy-Org/Qwen-Image_ComfyUI"
+    },
+    "qwen_image_vae.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
+      "folder": "vae",
+      "size_display": "254 MB",
+      "source": "Comfy-Org/Qwen-Image_ComfyUI"
+    },
+    "Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors": {
+      "url": "https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning/resolve/main/Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors",
+      "folder": "loras",
+      "source": "lightx2v/Qwen-Image-2512-Lightning"
+    },
+    "qwen_image_2.1_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+      "folder": "diffusion_models",
+      "size_display": "7.26 GB",
+      "source": "Comfy-Org/Qwen-Image-2.1",
+      "note": "This repo has no split_files/ prefix."
+    },
+    "qwen3vl_8b_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+      "folder": "text_encoders",
+      "size_display": "9.35 GB",
+      "source": "Comfy-Org/Qwen-Image-2.1"
+    },
+    "qwen_image_2.1_vae_bf16.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
+      "folder": "vae",
+      "size_display": "676 MB",
+      "source": "Comfy-Org/Qwen-Image-2.1",
+      "note": "Different VAE from qwen_image_vae.safetensors; required for 2.1."
+    },
+    "wan2.2_s2v_14B_fp8_scaled.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors",
+      "folder": "diffusion_models",
+      "size_bytes": 16394832474,
+      "source": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+    },
+    "umt5_xxl_fp8_e4m3fn_scaled.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "folder": "text_encoders",
+      "size_display": "6.74 GB",
+      "source": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+    },
+    "wan_2.1_vae.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+      "folder": "vae",
+      "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+      "size_display": "254 MB",
+      "source": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+      "note": "S2V uses the 2.1 VAE, not wan2.2_vae.safetensors."
+    },
+    "wav2vec2_large_english_fp16.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/audio_encoders/wav2vec2_large_english_fp16.safetensors",
+      "folder": "audio_encoders",
+      "size_bytes": 630997322,
+      "source": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+    },
+    "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+      "folder": "loras",
+      "size_bytes": 1226977424,
+      "source": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+    }
+  }
+}

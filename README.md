@@ -59,6 +59,7 @@ news-generator-generic/
 │   ├── avatars.py, tenant_avatars.py, tenant_voices.py
 │   ├── prompts.py, prompting.py
 │   ├── preflight.py            dependency checks before every run and for GET /health/deep
+│   ├── comfyui_models.py       which model files a template needs, whether a ComfyUI host has them, and downloading the rest
 │   ├── runs.py, worker.py, scheduler.py, schedules.py, profiles.py, search_preview.py
 │   ├── tenancy.py, tenants.py, audit.py, db.py, models.py, migrations.py
 │   └── logging_setup.py, system.py, errors.py
@@ -67,10 +68,13 @@ news-generator-generic/
 │   ├── generate_script.py
 │   ├── generate_audio.py
 │   ├── generate_video_comfyui.py
+│   ├── ensure_comfyui_models.py  audit a ComfyUI host's model files against a template and download what is missing
 │   └── init_db.py              create the database or apply migrations by hand
 ├── prompts/                    default prompt files: generic-news-reporter.md (summarize), video-anchor-scene.md,
 │                               video-sound.md, hero-image.md
+├── comfyui-helper-node/        ComfyUI custom node package adding model-download routes; install on every ComfyUI host
 ├── comfyui-workflows/
+│   ├── models.json                            download URL, folder and checksum for every model file the templates name
 │   ├── video_ltx2_3_ia2v-working.json         official LTX-2.3 IA2V template, unmodified apart from placeholders
 │   ├── video_ltx2_3_ia2v-extend.json          working + LTXVContextWindows (long clips without transitions)
 │   ├── video_ltx2_3_ia2v-extend-mac.json      extend with bf16 files for Apple Silicon
@@ -407,7 +411,7 @@ TextGenerateLTX2Prompt
 TrimAudioDuration
 ```
 
-Install the Lightricks LTX-2.3 / LTXV ComfyUI workflow dependencies on the target ComfyUI instance and place the checkpoint, text encoder, upscaler, and LoRA files where those nodes expect them. Common locations are ComfyUI `models/checkpoints`, `models/text_encoders`, `models/upscale_models`, and `models/loras`.
+Install the Lightricks LTX-2.3 / LTXV ComfyUI workflow dependencies on the target ComfyUI instance and place the checkpoint, text encoder, upscaler, and LoRA files where those nodes expect them. The folders are ComfyUI `models/checkpoints`, `models/text_encoders`, `models/latent_upscale_models` (the spatial upscaler; not `upscale_models`), and `models/loras`; `comfyui-workflows/models.json` records the exact folder and URL per file, and [ComfyUI Model Downloads](#comfyui-model-downloads) can fetch them for you.
 
 ### ComfyUI Validation Checklist
 
@@ -420,6 +424,49 @@ Before using this app against a ComfyUI server:
 4. Run the workflow once manually with test image/audio inputs.
 5. Confirm ComfyUI can write outputs and the app can reach /prompt, /history/{prompt_id}, /upload/image, and /view.
 ```
+
+Steps 2 and 3 are also done for you by the model audit below, and step 3's fix (download the files) can be automated.
+
+### ComfyUI Model Downloads
+
+The app can tell a ComfyUI host to download the model files a template names. ComfyUI's own HTTP API lists models (`GET /models/{folder}`) but has no public route to fetch one, so the repository ships two pieces:
+
+- `comfyui-workflows/models.json`, the manifest: for every model filename the templates reference, its download URL, the `models/` subfolder it belongs in, and a sha256 where known. ComfyUI's API-format export drops the download metadata the UI export carries, which is why this lives beside the templates. `python scripts/ensure_comfyui_models.py --check-manifest` (and the test suite) fails when a template references a file the manifest does not cover.
+- `comfyui-helper-node/`, a ComfyUI custom node package that registers no nodes and adds the routes `POST /news-generator/models/download`, `GET /news-generator/models/jobs`, and a few more (see its README). Copy or symlink `comfyui-helper-node/news_generator_helper` into `custom_nodes/` on every ComfyUI host and restart it. Downloads run on the host, one at a time, into the first configured path of the named folder (so `extra_model_paths.yaml` is honoured), resume after an interruption, and are sha256-verified when the manifest has a hash. Without the helper, the app falls back to ComfyUI-Manager's model queue when that is installed (`COMFYUI_MODEL_DOWNLOADER=auto`), but Manager's routes are undocumented and change between versions, so the helper is the supported path.
+
+How a template is checked: `services/comfyui_models.py` reads every loader input in the API-format JSON (`ckpt_name`, `unet_name`, `clip_name`, `vae_name`, `lora_name`, `model_name`, ...), asks the host for that node class (`GET /object_info/{class}`), and compares the template's value with the choices the host offers. A value the host does not list is a missing file; a class the host does not know is a missing custom node pack (ComfyUI-GGUF for the Q8 Mac template, for example), which the audit reports but cannot install.
+
+Three ways to run it:
+
+```text
+# CLI (reads .env; checks VIDEO_COMFYUI_WORKFLOW on the video host, AVATAR_/HERO_COMFYUI_WORKFLOW on the avatar host)
+.venv/bin/python scripts/ensure_comfyui_models.py                          # audit only
+.venv/bin/python scripts/ensure_comfyui_models.py --download --wait        # download what is missing, poll until done
+.venv/bin/python scripts/ensure_comfyui_models.py --host video --workflow comfyui-workflows/video_ltx2_3_ia2v-extend.json --download
+
+# REST (admin tenant)
+GET  /api/v1/system/comfyui/models?host=video|avatar&workflow=...   audit
+POST /api/v1/system/comfyui/models/ensure   json: {host?, workflow?, download: true}   202 with the jobs started
+GET  /api/v1/system/comfyui/models/jobs?host=                       progress per job: status, bytes, speed, error
+GET  /api/v1/system/comfyui/models/manifest                         manifest coverage
+
+# MCP (admin tenant)
+audit_comfyui_models(host?, workflow?), ensure_comfyui_models(host?, workflow?, download=true), get_comfyui_model_jobs(host?)
+```
+
+Preflight includes the audit as the `comfyui_video_models` check (and `comfyui_avatar_models` when the avatar host is preflighted): a run is refused at stage `preflight` when the template names a file the host lacks, with the filenames in the message. With `COMFYUI_AUTO_DOWNLOAD_MODELS=true`, preflight also starts the downloads on the host before refusing, so a scheduled run that fails on missing models fixes itself for the next fire; the check still fails until the files are in place, because a 30 GB checkpoint does not arrive within a preflight timeout.
+
+```text
+COMFYUI_AUTO_DOWNLOAD_MODELS=false   true: preflight queues missing manifest models for download
+COMFYUI_MODEL_DOWNLOADER=auto        auto (helper, then Manager), helper, manager, or none
+COMFYUI_MODELS_MANIFEST=comfyui-workflows/models.json
+COMFYUI_HF_TOKEN=                    passed with each download request for gated Hugging Face repos
+COMFYUI_CIVITAI_TOKEN=               same for Civitai URLs
+```
+
+Tokens can instead be set on the ComfyUI host (`HF_TOKEN`, `CIVITAI_API_TOKEN` in its environment); the request's token wins. The helper accepts URLs on `huggingface.co`, `hf.co` and `civitai.com` by default (`NEWS_GENERATOR_DOWNLOAD_ALLOWED_HOSTS` on the host widens that, for an internal mirror).
+
+Adding a template: export it in API format, add the placeholders, then run `--check-manifest` and add a row to `models.json` for every uncovered filename. The folder names are ComfyUI's (`checkpoints`, `diffusion_models`, `text_encoders`, `vae`, `loras`, `latent_upscale_models`, `audio_encoders`); `diffusion_models` and `unet` are the same folder set. Note the LTX spatial upscaler goes in `latent_upscale_models`, not `upscale_models`.
 
 ## 1. Search Sources
 
@@ -1007,6 +1054,10 @@ Routes under `/api/v1/` require a key: `Authorization: Bearer <key>` or `X-API-K
 ```text
 GET    /api/v1/me                       the calling tenant
 GET    /api/v1/system                   version, video settings, configured services, storage (URLs for admin only)
+GET    /api/v1/system/comfyui/models    admin only: model files each configured template needs and whether the ComfyUI host has them (host, workflow)
+POST   /api/v1/system/comfyui/models/ensure   admin only: json host, workflow, download; starts downloads on the host for missing manifest models
+GET    /api/v1/system/comfyui/models/jobs     admin only: download jobs each host reports
+GET    /api/v1/system/comfyui/models/manifest admin only: manifest coverage of the templates
 
 GET    /api/v1/voices                   list (limit, cursor)
 POST   /api/v1/voices                   multipart: name, sample (wav), language, replace
@@ -1190,7 +1241,7 @@ Seq is enabled by `SEQ_LOGGING_BASE_URL` and `SEQ_LOGGING_API_KEY`; when either 
 
 ## Preflight and Deep Health
 
-Every run begins with a preflight in `services/preflight.py` before any stage starts. It checks, in parallel with five-second timeouts: SearXNG (reachable, JSON format enabled, engines exist for the configured categories), the LLM (`OPENAI_MODEL` is served, context window read), the reranker (soft: a failure only degrades ranking to lexical), the TTS server (reachable, and the run's voice exists in its library), crawl4ai (soft; reports ok when extraction is disabled, warn when the server or token is wrong), ComfyUI video (reachable, queue depth, `VIDEO_COMFYUI_WORKFLOW` passes `validate_video_workflow`, the anchor image exists), ComfyUI avatar (a check exists behind `need_avatar`, but no caller sets it today, so the avatar server is not preflighted), and local prerequisites (ffmpeg and ffprobe on PATH, output directory writable, free disk).
+Every run begins with a preflight in `services/preflight.py` before any stage starts. It checks, in parallel with five-second timeouts: SearXNG (reachable, JSON format enabled, engines exist for the configured categories), the LLM (`OPENAI_MODEL` is served, context window read), the reranker (soft: a failure only degrades ranking to lexical), the TTS server (reachable, and the run's voice exists in its library), crawl4ai (soft; reports ok when extraction is disabled, warn when the server or token is wrong), ComfyUI video (reachable, queue depth, `VIDEO_COMFYUI_WORKFLOW` passes `validate_video_workflow`, the anchor image exists), ComfyUI video models (every model file the template names is offered by the host's loader nodes; see [ComfyUI Model Downloads](#comfyui-model-downloads)), ComfyUI avatar (a check exists behind `need_avatar`, but no caller sets it today, so the avatar server is not preflighted), and local prerequisites (ffmpeg and ffprobe on PATH, output directory writable, free disk).
 
 Each check is logged as a `[preflight]` line in `run.log` and the full result is written to `preflight.json` in the run directory. Any hard failure ends the run at stage `preflight` with a message naming every failed service, and nothing is generated. Results are cached for thirty seconds. `PREFLIGHT_TIMEOUT_SECONDS` overrides the per-check timeout.
 
@@ -1202,6 +1253,17 @@ GET /health/deep?voice=<voice>&avatar_name=<avatar>
 ```
 
 Returns 200 when every hard check passes and 503 otherwise, with the same JSON body either way. Use it as a service status panel and before scheduling runs.
+
+## Tests
+
+`tests/` holds unit tests for the ComfyUI model audit (`services/comfyui_models.py`, with HTTP faked) and the helper node's download engine (against a local HTTP server: resume, sha256, gated URLs, path safety). They need only `pytest` and `requests`, no running services:
+
+```text
+pip install pytest
+python -m pytest tests/ -q
+```
+
+One test fails when a template references a model file that `comfyui-workflows/models.json` does not cover.
 
 ## Incremental Test Gates
 
@@ -1281,6 +1343,7 @@ Implemented tools:
 ```text
 preflight(voice?, avatar_name?)   verify every dependency; same result as GET /health/deep
 get_system_info()                 version, video settings, configured services, storage
+audit_comfyui_models, ensure_comfyui_models, get_comfyui_model_jobs   (admin only) model files per template on each ComfyUI host
 list_voices, get_voice, upload_voice(name, sample_path), delete_voice
 list_avatars, get_avatar, generate_avatar, upload_avatar(name, image_path), delete_avatar
 list_prompts, get_prompt, update_prompt (admin), test_prompt(kind=summarize, search_text, max_articles)

@@ -114,6 +114,9 @@ Conventions:
 | `preview_search` | `search_text, categories?, language?, max_articles?, max_age_days?, rank_query?` | `{ raw_count, dated_count, candidate_count, selected: [{ title, url, outlet, published_at, score, snippet }], rank, effective }`. Search plus ranking only; no LLM, no run. |
 | `get_search_options` | none | `{ categories: [string], defaults: { max_articles, max_age_days, categories, language, intended_video_max_seconds, wpm } }` |
 | `get_system_info` | none | `{ version, video: { width, height, fps, workflow }, services: [{ name, configured: bool }], storage: { data_dir, free_bytes } }`. Never returns service URLs to non-admin tenants. |
+| `audit_comfyui_models` | `host?, workflow?` | `{ targets: [{ host, base_url, workflow, models: [{ filename, folder, installed, in_manifest, url, nodes }], missing, downloadable, unknown, missing_classes, ok }], ok }`. Reads each loader node's choices from the host; starts nothing. Admin only. |
+| `ensure_comfyui_models` | `host?, workflow?, download = true` | The audit plus `downloader` (`helper`, `manager`, or null), `started: [job]`, `errors: [{ filename, message }]` per target. Downloads run on the ComfyUI host asynchronously. Admin only. |
+| `get_comfyui_model_jobs` | `host?` | `{ hosts: [{ host, base_url, downloader, jobs: [{ id, status, filename, bytes_done, bytes_total, percent, speed_bps, error }] }] }`. Admin only. |
 
 ### Voices
 

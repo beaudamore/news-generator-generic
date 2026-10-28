@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from services import avatars, db, logging_setup, pipeline, preflight, profiles, prompts, runs, schedules, search_preview, system, tenancy, tenant_avatars, tenant_voices, tenants  # noqa: E402
+from services import avatars, comfyui_models, db, logging_setup, pipeline, preflight, profiles, prompts, runs, schedules, search_preview, system, tenancy, tenant_avatars, tenant_voices, tenants  # noqa: E402
 from services.errors import ApiError  # noqa: E402
 from services.models import Tenant  # noqa: E402
 
@@ -92,6 +92,38 @@ def preflight_tool(voice: Optional[str] = None, avatar_name: Optional[str] = Non
 def get_system_info_tool() -> dict[str, Any]:
     """Version, video output settings, configured services, and storage for the calling tenant. URLs only for admin."""
     return system.get_system_info(_tenant())
+
+
+@catalog_tool("audit_comfyui_models")
+def audit_comfyui_models_tool(host: Optional[str] = None, workflow: Optional[str] = None) -> dict[str, Any]:
+    """Which model files the configured ComfyUI templates need and whether each host has them. Starts nothing. Admin only.
+
+    host: "video", "avatar", or omitted for both. workflow: one template to check instead of the
+    configured ones (a path under comfyui-workflows/ or a bare avatar template name). Returns
+    {"targets": [{"host", "base_url", "workflow", "models": [...], "missing", "downloadable",
+    "unknown", "missing_classes", "ok"}], "ok"}.
+    """
+    tenants.require_admin(_tenant())
+    return comfyui_models.audit_configured(host, workflow)
+
+
+@catalog_tool("ensure_comfyui_models")
+def ensure_comfyui_models_tool(host: Optional[str] = None, workflow: Optional[str] = None, download: bool = True) -> dict[str, Any]:
+    """Audit the templates and tell each ComfyUI host to download the missing model files it knows the URL for. Admin only.
+
+    Downloads run on the host (through the news-generator helper node, or ComfyUI-Manager as a
+    fallback) and are asynchronous: the result lists the jobs started; poll get_comfyui_model_jobs.
+    A file with no manifest entry (comfyui-workflows/models.json) is reported under "unknown".
+    """
+    tenants.require_admin(_tenant())
+    return comfyui_models.ensure_configured(host, workflow, download=download)
+
+
+@catalog_tool("get_comfyui_model_jobs")
+def get_comfyui_model_jobs_tool(host: Optional[str] = None) -> dict[str, Any]:
+    """Model download jobs each ComfyUI host reports: status, bytes done and total, speed, error. Admin only."""
+    tenants.require_admin(_tenant())
+    return comfyui_models.jobs_configured(host)
 
 
 # ----------------------------------------------------------------------------- voices

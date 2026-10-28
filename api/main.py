@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -16,6 +17,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -25,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from mcp_server import server as mcp_server  # noqa: E402
-from services import avatars, db, logging_setup, pipeline, preflight, profiles, prompts, runs, scheduler, schedules, search_preview, system, tenancy, tenant_avatars, tenant_voices, tenants, tts, worker  # noqa: E402
+from services import avatars, comfyui_models, db, logging_setup, pipeline, preflight, profiles, prompts, runs, scheduler, schedules, search_preview, system, tenancy, tenant_avatars, tenant_voices, tenants, tts, worker  # noqa: E402
 from services.errors import ApiError, not_found  # noqa: E402
 from services.models import Tenant  # noqa: E402
 
@@ -213,6 +215,43 @@ def api_me(tenant: Tenant = Depends(get_tenant)) -> JSONResponse:
 def api_system(tenant: Tenant = Depends(get_tenant)) -> JSONResponse:
     """Version, video settings, configured services, and storage (catalog: get_system_info)."""
     return JSONResponse(system.get_system_info(tenant))
+
+
+# ----------------------------------------------------------------------------- /api/v1 system: ComfyUI models (admin only)
+
+
+@app.get("/api/v1/system/comfyui/models")
+def api_comfyui_models_audit(host: Optional[str] = None, workflow: Optional[str] = None, tenant: Tenant = Depends(get_tenant)) -> JSONResponse:
+    """Which model files the configured templates need and whether each ComfyUI host has them. No downloads (catalog: audit_comfyui_models)."""
+    tenants.require_admin(tenant)
+    return JSONResponse(comfyui_models.audit_configured(host, workflow))
+
+
+@app.post("/api/v1/system/comfyui/models/ensure")
+async def api_comfyui_models_ensure(request: Request, tenant: Tenant = Depends(get_tenant)) -> JSONResponse:
+    """Audit and start downloads on the host for every missing model the manifest knows. 202; poll the jobs route (catalog: ensure_comfyui_models)."""
+    tenants.require_admin(tenant)
+    raw = await request.body()
+    body = json.loads(raw) if raw.strip() else {}
+    if not isinstance(body, dict):
+        raise ApiError("invalid", "Body must be a JSON object.")
+    # The audit talks to the ComfyUI hosts over HTTP; keep the event loop free while it does.
+    result = await run_in_threadpool(comfyui_models.ensure_configured, body.get("host"), body.get("workflow"), bool(body.get("download", True)))
+    return JSONResponse(result, status_code=202 if any(t.get("started") for t in result["targets"]) else 200)
+
+
+@app.get("/api/v1/system/comfyui/models/jobs")
+def api_comfyui_models_jobs(host: Optional[str] = None, tenant: Tenant = Depends(get_tenant)) -> JSONResponse:
+    """Download jobs each ComfyUI host reports: status, bytes, speed, error (catalog: get_comfyui_model_jobs)."""
+    tenants.require_admin(tenant)
+    return JSONResponse(comfyui_models.jobs_configured(host))
+
+
+@app.get("/api/v1/system/comfyui/models/manifest")
+def api_comfyui_models_manifest(tenant: Tenant = Depends(get_tenant)) -> JSONResponse:
+    """Manifest coverage: every template model reference with and without a manifest entry."""
+    tenants.require_admin(tenant)
+    return JSONResponse(comfyui_models.check_manifest())
 
 
 # ----------------------------------------------------------------------------- /api/v1 voices
