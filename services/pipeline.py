@@ -83,7 +83,7 @@ def _silences(path: Path, noise_db: int = -40, min_seconds: float = 0.3) -> list
 
 
 def trim_trailing_burst(run_dir: Path, path: Path, min_pause: float = 0.4, max_burst: float = 0.6) -> Optional[float]:
-    """Cut a hallucinated syllable off the end of a Chatterbox narration.
+    """Cut a hallucinated syllable off the end of a TTS narration.
 
     The artifact has one shape: real speech, a pause of at least `min_pause`, a burst shorter than
     `max_burst`, then the end of the file. When the file ends that way it is cut at the start of the
@@ -992,7 +992,7 @@ def generate_news_video(
 ) -> dict:
     log_event(run_dir, "run", f"run_id={run_id} search_text={search_text!r} voice={voice!r} anchor={anchor_path.name} script_provided={bool(script_text)}")
     # Preflight: refuse the run before any stage if a required service is down or misconfigured.
-    # A voice that arrives as an uploaded sample does not exist in Chatterbox yet, so it is not checked.
+    # A voice that arrives as an uploaded sample does not exist in the TTS library yet, so it is not checked.
     checks = preflight.run_preflight(
         voice=None if voice_sample_path is not None else voice,
         anchor_path=anchor_path,

@@ -7,9 +7,9 @@ The app itself is CPU-only and portable. All heavy work happens on external HTTP
 | Dependency | Env var(s) | What it does |
 |---|---|---|
 | SearXNG | `SEARXNG_BASE_URL` | news/web search |
-| OpenAI-compatible LLM (Ollama, llama.cpp, vLLM) | `OPENAI_BASE_URL`, `OPENAI_MODEL` | script writing |
+| OpenAI-compatible LLM (llama.cpp, vLLM, SGLang, Ollama) | `OPENAI_BASE_URL`, `OPENAI_MODEL` | script writing |
 | Reranker (llama.cpp, vLLM, TEI) | `NEWS_CONTEXT_RERANK_*` | optional evidence reranking |
-| Chatterbox TTS | `CHATTERBOX_BASE_URL` | narration audio |
+| TTS server (OpenAI-compatible, Qwen3-TTS) | `TTS_OPENAI_BASE_URL`, `TTS_OPENAI_MODEL` | narration audio and the voice library |
 | ComfyUI (video) | `VIDEO_COMFYUI_BASE_URL`, `VIDEO_COMFYUI_WORKFLOW` | LTX-2.3 talking-head video; the workflow must be the official IA2V template, see README "Video Workflow" |
 | ComfyUI (avatar, optional) | `AVATAR_COMFYUI_BASE_URL` | Z-Image-Turbo avatar generation |
 
@@ -55,7 +55,7 @@ Every URL in `.env` must answer before testing the app. Quick probe:
 # Windows PowerShell — adjust hosts to your .env values
 'Ollama=http://localhost:11434/v1/models',
 'SearXNG=http://localhost:8888/config',
-'Chatterbox=http://your-tts-host:4123/voices',
+'TTS=http://your-tts-host:8184/v1/audio/voices',
 'VideoComfyUI=http://your-gpu-host:8188/system_stats',
 'AvatarComfyUI=http://your-avatar-host:8188/system_stats',
 'Reranker=http://127.0.0.1:8033/health' |
@@ -148,7 +148,7 @@ curl http://localhost:8000/health
 # expect {"status":"ok"}
 ```
 
-### Gate 2 — Voices listed (proves Chatterbox connectivity)
+### Gate 2 — Voices listed (proves TTS server connectivity)
 
 ```bash
 curl http://localhost:8000/voices
@@ -165,7 +165,7 @@ curl -X POST http://localhost:8000/stages/script \
 
 Inspect `output/<run_id>/report.md` to confirm evidence sentences and rerank scores look sane.
 
-### Gate 4 — Audio (proves Chatterbox synthesis)
+### Gate 4 — Audio (proves TTS synthesis)
 
 Use the `run_id` from Gate 3. First run: also upload a voice sample to create the named voice.
 
@@ -228,7 +228,7 @@ curl -OJ http://localhost:8000/runs/<run_id>/video
 | error stage `search` | SearXNG down or `SEARXNG_BASE_URL` wrong |
 | error stage `script` | LLM server down, `OPENAI_MODEL` doesn't exist on it, or word-cap exceeded |
 | script gate hangs then falls back to title-based script | `OPENAI_BASE_URL` unreachable |
-| error stage `audio` | Chatterbox down, or `voice` not in `GET /voices` and no sample uploaded |
+| error stage `audio` | TTS server down, `TTS_OPENAI_MODEL` not served, or `voice` not in `GET /voices` and no sample uploaded |
 | error stage `video` | ComfyUI down, workflow nodes/models missing, or timeout too low for the GPU |
 | error stage `video` naming `LTXVReferenceAudio` / `LTXVEmptyLatentAudio` / placeholders | `VIDEO_COMFYUI_WORKFLOW` points at the wrong template; use the official IA2V export (README "Video Workflow") |
 | video babbles, says words not in the script, or cuts off before the narration ends | same cause: an ID-LoRA voice-clone template that generates its own speech; the validator now refuses these |

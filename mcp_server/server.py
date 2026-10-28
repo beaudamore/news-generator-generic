@@ -71,7 +71,7 @@ def catalog_tool(name: str) -> Callable:
 def preflight_tool(voice: Optional[str] = None, avatar_name: Optional[str] = None) -> dict[str, Any]:
     """Verify every service the news pipeline depends on before starting a run.
 
-    Checks SearXNG, the LLM model, the reranker (soft), Chatterbox and the given
+    Checks SearXNG, the LLM model, the reranker (soft), the TTS server and the given
     voice, ComfyUI with template validation and the given avatar, and local
     prerequisites. Returns {"ok", "checks": [{"service", "status", "detail",
     "latency_ms"}], "checked_at", "duration_ms", "cached"}. Cached 30 seconds.
@@ -105,13 +105,13 @@ def list_voices_tool(limit: Optional[int] = None, cursor: Optional[str] = None) 
 
 @catalog_tool("get_voice")
 def get_voice_tool(name: str) -> dict[str, Any]:
-    """One voice by name, including its Chatterbox library name."""
+    """One voice by name, including its TTS library name."""
     return tenant_voices.get_voice(_tenant(), name)
 
 
 @catalog_tool("upload_voice")
 def upload_voice_tool(name: str, sample_path: str, language: str = "en", replace: bool = False) -> dict[str, Any]:
-    """Create a voice from a WAV sample on the server host and register it in Chatterbox as <tenant>-<name>.
+    """Create a voice from a WAV sample on the server host and register it in the TTS library as <tenant>-<name>.
 
     Fails with conflict if the name exists and replace is false.
     """
@@ -120,7 +120,7 @@ def upload_voice_tool(name: str, sample_path: str, language: str = "en", replace
 
 @catalog_tool("delete_voice")
 def delete_voice_tool(name: str) -> dict[str, Any]:
-    """Delete a voice from Chatterbox and the tenant. Returns {"deleted": name}."""
+    """Delete a voice from the TTS library and the tenant. Returns {"deleted": name}."""
     return tenant_voices.delete_voice(_tenant(), name)
 
 

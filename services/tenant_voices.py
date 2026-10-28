@@ -1,4 +1,4 @@
-"""Tenant voices over the single TTS voice library (Chatterbox or the OpenAI-compatible server, see services/tts.py).
+"""Tenant voices over the single TTS voice library (the OpenAI-compatible server, see services/tts.py).
 
 The TTS server has one flat voice library. Each tenant voice is stored there under
 `<tenant slug>-<name>`; the tenant only ever sees `<name>`. The sample WAV is kept

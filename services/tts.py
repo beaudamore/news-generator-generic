@@ -1,15 +1,11 @@
 """Text-to-speech: the one place that talks to the TTS server.
 
-TTS_PROVIDER picks the server:
-
-  chatterbox (default)  CHATTERBOX_BASE_URL, CHATTERBOX_DEFAULT_TIMEOUT_SECONDS
-  openai                an OpenAI-compatible /v1/audio/speech server (vLLM-Omni serving Qwen3-TTS):
-                        TTS_OPENAI_BASE_URL (ends in /v1), TTS_OPENAI_MODEL, TTS_OPENAI_API_KEY,
-                        TTS_OPENAI_TIMEOUT_SECONDS
-
-Both keep a voice library (list, upload a sample, delete) and synthesize a WAV from text and a
-library voice name. The pipeline, preflight, tenant voices, runs, the API and the CLI all call the
-functions here; none of them builds a TTS URL or reads a TTS env var itself.
+The server is OpenAI-compatible (Qwen3-TTS behind vLLM-Omni or mlx): /v1/audio/speech for synthesis
+and /v1/audio/voices for the voice library (list, upload a sample, delete). Configured by
+TTS_OPENAI_BASE_URL (ends in /v1), TTS_OPENAI_MODEL, TTS_OPENAI_API_KEY and TTS_OPENAI_TIMEOUT_SECONDS.
+The pipeline, preflight, tenant voices, runs, the API and the CLI all call the functions here; none of
+them builds a TTS URL or reads a TTS env var itself. The Chatterbox provider was removed; a leftover
+TTS_PROVIDER=chatterbox in .env is refused with a clear message.
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-PROVIDERS = ("chatterbox", "openai")
 PREVIEW_TEXT = "This is a sample of this voice reading a short news line."
 
 
@@ -42,62 +37,55 @@ def _requests():
     return importlib.import_module("requests")
 
 
-# ----------------------------------------------------------------------------- provider
+# ----------------------------------------------------------------------------- server
 
 
-def provider() -> str:
-    return os.environ.get("TTS_PROVIDER", "").strip().lower() or "chatterbox"
-
-
-def _openai() -> bool:
-    name = provider()
-    if name not in PROVIDERS:
-        raise VoiceServiceError(f"TTS_PROVIDER must be one of {PROVIDERS}, got {name!r}.")
-    return name == "openai"
+def _refuse_removed_provider() -> None:
+    value = os.environ.get("TTS_PROVIDER", "").strip().lower()
+    if value and value != "openai":
+        raise VoiceServiceError(f"TTS_PROVIDER={value!r} is not supported: the Chatterbox provider was removed. Unset TTS_PROVIDER and set TTS_OPENAI_*.")
 
 
 def service_name() -> str:
     """Name of the TTS service in preflight checks, system info and logs."""
-    return "tts_openai" if provider() == "openai" else "chatterbox"
+    return "tts_openai"
 
 
 def label() -> str:
     """Name of the TTS service in messages shown to a person."""
-    return "OpenAI-compatible TTS" if provider() == "openai" else "Chatterbox"
+    return "TTS server"
 
 
 def base_url_env() -> str:
-    return "TTS_OPENAI_BASE_URL" if provider() == "openai" else "CHATTERBOX_BASE_URL"
+    return "TTS_OPENAI_BASE_URL"
 
 
 def base_url() -> str:
-    _openai()  # refuse an unknown provider before reading its settings
-    name = base_url_env()
-    value = os.environ.get(name, "").strip()
+    _refuse_removed_provider()
+    value = os.environ.get(base_url_env(), "").strip()
     if not value:
-        raise VoiceServiceError(f"Set {name}.")
+        raise VoiceServiceError(f"Set {base_url_env()}.")
     return value.rstrip("/")
 
 
 def default_timeout() -> int:
-    name = "TTS_OPENAI_TIMEOUT_SECONDS" if provider() == "openai" else "CHATTERBOX_DEFAULT_TIMEOUT_SECONDS"
-    return int(os.environ.get(name, "120"))
+    return int(os.environ.get("TTS_OPENAI_TIMEOUT_SECONDS", "120"))
 
 
 def _headers() -> dict[str, str]:
-    key = os.environ.get("TTS_OPENAI_API_KEY", "").strip() if _openai() else ""
+    key = os.environ.get("TTS_OPENAI_API_KEY", "").strip()
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def _voices_url() -> str:
-    return f"{base_url()}/audio/voices" if _openai() else f"{base_url()}/voices"
+    return f"{base_url()}/audio/voices"
 
 
 # ----------------------------------------------------------------------------- voice library
 
 
 def _voice_entries(timeout: float) -> list[dict]:
-    """The server's voice library as [{"name", "aliases"}]. Chatterbox lists objects; the OpenAI-compatible server lists bare names."""
+    """The server's voice library as [{"name", "aliases"}]. The server lists bare names; objects with aliases are accepted too."""
     response = _requests().get(_voices_url(), headers=_headers(), timeout=timeout)
     response.raise_for_status()
     entries = []
@@ -135,13 +123,9 @@ def delete_voice(voice: str, timeout: float) -> None:
 
 def upload_voice(voice: str, voice_sample_path: Path, timeout: float) -> None:
     with voice_sample_path.open("rb") as voice_file:
-        if _openai():
-            # The server refuses an upload without a consent record id.
-            data = {"name": voice, "consent": f"news-generator-{date.today().isoformat()}"}
-            files = {"audio_sample": (voice_sample_path.name, voice_file, "audio/wav")}
-        else:
-            data = {"voice_name": voice, "language": "en"}
-            files = {"voice_file": (voice_sample_path.name, voice_file, "audio/wav")}
+        # The server refuses an upload without a consent record id.
+        data = {"name": voice, "consent": f"news-generator-{date.today().isoformat()}"}
+        files = {"audio_sample": (voice_sample_path.name, voice_file, "audio/wav")}
         response = _requests().post(_voices_url(), data=data, files=files, headers=_headers(), timeout=timeout)
     response.raise_for_status()
 
@@ -191,10 +175,9 @@ def _speech(text: str, voice: str, timeout: float):
         "response_format": "wav",
         "voice": voice,
     }
-    if _openai():
-        model = os.environ.get("TTS_OPENAI_MODEL", "").strip()
-        if model:
-            payload["model"] = model
+    model = os.environ.get("TTS_OPENAI_MODEL", "").strip()
+    if model:
+        payload["model"] = model
     response = _requests().post(f"{base_url()}/audio/speech", json=payload, headers=_headers(), timeout=timeout)
     response.raise_for_status()
     return response
@@ -233,21 +216,13 @@ def check(voice: Optional[str], timeout: float) -> tuple[str, str]:
     """Preflight body, returning (status, detail): the server answers, its model is up, and it has `voice` when one is given."""
     base = base_url()
     requests = _requests()
-    if _openai():
-        model = os.environ.get("TTS_OPENAI_MODEL", "").strip()
-        listing = requests.get(f"{base}/models", headers=_headers(), timeout=timeout)
-        listing.raise_for_status()
-        served = sorted(item["id"] for item in listing.json().get("data") or [] if isinstance(item, dict) and item.get("id"))
-        if model and model not in served:
-            return "fail", f"model {model!r} not served; available: {served}"
-        ready = f"serving {model or served}"
-    else:
-        health = requests.get(f"{base}/health", timeout=timeout)
-        health.raise_for_status()
-        data = health.json()
-        if not data.get("model_loaded"):
-            return "fail", f"model not loaded (state={data.get('initialization_state')!r})"
-        ready = f"model loaded on {data.get('device')}"
+    model = os.environ.get("TTS_OPENAI_MODEL", "").strip()
+    listing = requests.get(f"{base}/models", headers=_headers(), timeout=timeout)
+    listing.raise_for_status()
+    served = sorted(item["id"] for item in listing.json().get("data") or [] if isinstance(item, dict) and item.get("id"))
+    if model and model not in served:
+        return "fail", f"model {model!r} not served; available: {served}"
+    ready = f"serving {model or served}"
     if voice:
         names = voice_names(timeout)
         if voice not in names:

@@ -31,7 +31,7 @@ const HELP: Record<string, { hint: string; placeholder?: string }> = {
   search_text: { hint: 'Your search terms, sent to SearXNG as the query. Any topic works: "NASA Artemis launch", "Detroit housing market", "latest AI news".', placeholder: 'NASA Artemis launch' },
   max_articles: { hint: 'How many distinct stories the script is written from. Further articles on a story already picked are folded into it and credited, not counted. 1 to 3 keeps runs short.' },
   max_age_days: { hint: 'Only articles published within this many days are used. Undated pages are always dropped.' },
-  voice: { hint: 'Chatterbox voice for the narration. Tenant voices first, then the shared library.' },
+  voice: { hint: 'TTS voice for the narration. Tenant voices first, then the shared library.' },
   avatar: { hint: 'The anchor image the video is rendered from. Create one on the Avatars screen.' },
   intended_video_max_seconds: { hint: 'Target length of the spoken script in seconds. Sets the word cap the writer must respect.' },
   wpm: { hint: 'Speaking rate used to turn seconds into the word cap.' },

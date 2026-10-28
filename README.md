@@ -1,6 +1,6 @@
 # News Generator Generic MCP
 
-Generic news-video generation API for turning either search terms or a pre-made script into Chatterbox narration and a ComfyUI talking-head video.
+Generic news-video generation API for turning either search terms or a pre-made script into narrated, segmented ComfyUI talking-head video: SearXNG search, crawl4ai article extraction, an OpenAI-compatible LLM for the script, an OpenAI-compatible TTS server (Qwen3-TTS) for the narration, ComfyUI for per-segment hero images and the video, and ffmpeg to assemble it.
 
 The FastAPI API is the source of truth for normal use. The CLI scripts are low-level helpers for testing individual stages.
 
@@ -12,11 +12,11 @@ Shell examples in this README use POSIX paths (`.venv/bin/python`). On Windows, 
 
 1. `POST /generate` with multipart form data.
 2. Provide an anchor image with `anchor_image_file`, or use a stored/generated avatar with `avatar_name`.
-3. Provide a Chatterbox `voice`; optionally upload `voice_sample_file` to create or replace that named voice.
+3. Provide a `voice` from the TTS server's library; optionally upload `voice_sample_file` to create or replace that named voice.
 4. Provide either `search_text` or `script_text`.
 5. If `search_text` is provided, the app searches SearXNG, optionally reranks evidence, and generates a script.
 6. If `script_text` is provided, the app skips search/rerank/script generation and uses that script directly for audio.
-7. The app generates narration audio, sends the image/audio/script to ComfyUI, and returns downloadable run artifacts.
+7. The script is split into chunks (see [Segmented Rendering](#segmented-rendering)). Each chunk is narrated, rendered through ComfyUI, and, when the anchor image carries a green panel, gets a hero image composited into it (see [Hero Images](#hero-images)). The clips are appended with ffmpeg and the run artifacts are returned.
 
 Minimum first request:
 
@@ -43,102 +43,96 @@ curl -X POST http://localhost:8000/generate \
 ```text
 news-generator-generic/
 ├── README.md
-├── Dockerfile
-├── docker-compose.yml
+├── Dockerfile                  multi-stage: Node builds web/dist, Python image adds ffmpeg + the app
+├── docker-compose.yml          app + searxng (+ optional MCP-only instance)
 ├── requirements.txt
-├── .env                  local only, gitignored; copy from the Environment section
-├── api/                  FastAPI HTTP API (api/main.py)
-├── assets/
-│   └── avatars/          stored avatar PNGs + metadata (runtime-created)
+├── .env.example                the configuration template; copy to .env (gitignored) and fill in the keys
+├── api/main.py                 FastAPI HTTP API: legacy /generate and /stages/*, /api/v1/*, /health, /admin, /mcp
+├── mcp_server/                 MCP server (stdio via `python -m mcp_server`, streamable HTTP mounted at /mcp)
+├── services/                   shared logic; api/, mcp_server/ and the worker all call into here
+│   ├── pipeline.py             stages: search, script, images (heroes), audio, video; the legacy /generate flow
+│   ├── segments.py             chunking, per-chunk render loop, green-panel hero compositing, ffmpeg assembly
+│   ├── evidence.py             sentence evidence, reranking backends, story and evidence dedupe
+│   ├── extract.py              crawl4ai article extraction
+│   ├── llm.py                  LLM backend detection and context-window sizing
+│   ├── tts.py                  the one TTS client (OpenAI-compatible /v1/audio/speech, Qwen3-TTS)
+│   ├── avatars.py, tenant_avatars.py, tenant_voices.py
+│   ├── prompts.py, prompting.py
+│   ├── preflight.py            dependency checks before every run and for GET /health/deep
+│   ├── runs.py, worker.py, scheduler.py, schedules.py, profiles.py, search_preview.py
+│   ├── tenancy.py, tenants.py, audit.py, db.py, models.py, migrations.py
+│   └── logging_setup.py, system.py, errors.py
+├── scripts/                    standalone CLI helpers for one stage at a time
+│   ├── search_searxng.py
+│   ├── generate_script.py
+│   ├── generate_audio.py
+│   ├── generate_video_comfyui.py
+│   └── init_db.py              create the database or apply migrations by hand
+├── prompts/                    default prompt files: generic-news-reporter.md (summarize), video-anchor-scene.md,
+│                               video-sound.md, hero-image.md
 ├── comfyui-workflows/
-│   ├── avatar_image_z_image_turbo_1080p.json
-│   └── video_ltx2_3_ia2v-working.json
-├── docs/                 admin setup and testing guide
-├── output/               run artifacts (runtime-created)
-├── prompts/
-├── services/             shared pipeline, evidence, voices, avatars
-└── scripts/
-    ├── search_searxng.py
-    ├── generate_script.py
-    ├── generate_audio.py
-    └── generate_video_comfyui.py
+│   ├── video_ltx2_3_ia2v-working.json         official LTX-2.3 IA2V template, unmodified apart from placeholders
+│   ├── video_ltx2_3_ia2v-extend.json          working + LTXVContextWindows (long clips without transitions)
+│   ├── video_ltx2_3_ia2v-extend-mac.json      extend with bf16 files for Apple Silicon
+│   ├── video_ltx2_3_ia2v-extend-mac-q8.json   extend with Q8 GGUF loaders for Apple Silicon (docs/mac/)
+│   ├── video_wan2_2_14B_s2v.json              Wan2.2 S2V alternative (parked, see Segmented Rendering)
+│   └── avatar/                                image templates for avatars and heroes
+│       ├── avatar_image_z_image_turbo_1080p.json
+│       ├── image_z_image_turbo_int8.json
+│       ├── image_qwen_image_2_1.json
+│       └── image_qwen_Image_2512.json
+├── web/                        React admin UI (Vite); built to web/dist and served at /admin
+├── docs/
+│   ├── admin-setup.md          first-time setup and verification sequence
+│   ├── status.md               what is proven, what is built but unproven, current .env, next steps
+│   ├── migrations.md           schema history and the production update procedure
+│   ├── expansions.md           planned expansions
+│   ├── ui-dev1.md              the operation catalog (MCP tool contract) and UI design
+│   └── mac/README.md           LTX-2.3 on Apple Silicon findings
+├── assets/avatars/<tenant>/    stored avatar PNGs + metadata (runtime-created, gitignored)
+├── assets/voices/<tenant>/     uploaded voice samples (runtime-created, gitignored)
+├── data/news.db                SQLite (runtime-created, gitignored)
+├── logs/app.jsonl              JSON log (runtime-created, gitignored)
+└── output/<tenant>/<run_id>/   run artifacts (runtime-created, gitignored)
 ```
 
 ## Environment
 
-The current `.env` surface is:
+[.env.example](.env.example) is the configuration template and the authoritative list of keys. Copy it to `.env` (gitignored) and fill in the keys; `.env` is loaded once at process start by python-dotenv and by `docker compose` through `env_file`, so restart after editing. Its header shows the lines that differ between an Apple Silicon ComfyUI host and a CUDA host.
 
-```env
-ADMIN_API_KEY=
-ADMIN_TENANT_NAME=Admin
-ADMIN_TENANT_SLUG=admin
-AVATAR_API_KEY=
-AVATAR_COMFYUI_BASE_URL=http://avatar-comfyui-host:8188
-AVATAR_COMFYUI_TIMEOUT_SECONDS=1800
-AVATAR_COMFYUI_WORKFLOW=comfyui-workflows/avatar/image_z_image_turbo_int8.json
-AVATAR_DEFAULT_HEIGHT=720
-AVATAR_DEFAULT_WIDTH=1280
-AVATAR_MAX_DIMENSION=1920
-AVATAR_NEGATIVE_PROMPT=blurry, low quality, distorted, deformed, ugly, bad anatomy, watermark, text, signature
-AVATAR_STORAGE_PATH=assets/avatars
+The keys fall into these groups (details in the sections linked):
 
-CHATTERBOX_BASE_URL=http://chatterbox-host:4123
-CHATTERBOX_DEFAULT_TIMEOUT_SECONDS=120
+| Group | Keys | See |
+| --- | --- | --- |
+| Avatar images | `AVATAR_API_KEY`, `AVATAR_COMFYUI_BASE_URL`, `AVATAR_COMFYUI_TIMEOUT_SECONDS`, `AVATAR_COMFYUI_WORKFLOW`, `AVATAR_DEFAULT_WIDTH`, `AVATAR_DEFAULT_HEIGHT`, `AVATAR_NEGATIVE_PROMPT`, `AVATAR_STORAGE_PATH` | [Avatar Workflow](#avatar-workflow) |
+| TTS | `TTS_OPENAI_BASE_URL`, `TTS_OPENAI_MODEL`, `TTS_OPENAI_API_KEY`, `TTS_OPENAI_TIMEOUT_SECONDS` | [Generate Audio](#3-generate-audio) |
+| Search | `SEARXNG_BASE_URL`, `SEARXNG_DEFAULT_*` | [Search Sources](#1-search-sources) |
+| Ranking and evidence | `NEWS_SOURCE_RANK_*`, `NEWS_CONTEXT_*` | [Source Ranking](#source-ranking), [Sentence Evidence Context](#sentence-evidence-context) |
+| Article extraction | `CRAWL4AI_API_URL`, `CRAWL4AI_API_TOKEN`, `ARTICLE_EXTRACTION_ENABLED`, `ARTICLE_EXTRACT_*` | [Article Extraction](#article-extraction-crawl4ai) |
+| Script LLM | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `OPENAI_DEFAULT_TIMEOUT_SECONDS`, `OPENAI_REASONING_EFFORT`, `LLM_CONTEXT_*`, `LLM_RESERVE_TOKENS` | [Script LLM](#script-llm), [LLM Context Window](#llm-context-window) |
+| Prompts and timing | `NEWS_SUMMARIZE_PROMPT[_FILE]`, `NEWS_VIDEO_PROMPT[_FILE]`, `NEWS_VIDEO_SOUND_PROMPT[_FILE]`, `NEWS_HERO_PROMPT[_FILE]`, `NEWS_DEFAULT_WPM`, `NEWS_INTENDED_VIDEO_MAX_SECONDS`, `NEWS_OUTPUT_DIRECTORY` | [Generate Script](#2-generate-script) |
+| Video | `VIDEO_COMFYUI_BASE_URL`, `VIDEO_COMFYUI_WORKFLOW`, `VIDEO_COMFYUI_WIDTH`, `VIDEO_COMFYUI_HEIGHT`, `VIDEO_COMFYUI_FPS`, `VIDEO_COMFYUI_OUTPUT_PREFIX`, `VIDEO_COMFYUI_TIMEOUT_SECONDS`, `VIDEO_COMFYUI_PROMPT_ENHANCE`, `VIDEO_COMFYUI_FREE_BEFORE_RUN`, `VIDEO_LTX_TAIL_PAD_SECONDS`, `VIDEO_WAN_S2V_WIDTH`, `VIDEO_WAN_S2V_HEIGHT`, `VIDEO_WAN_S2V_FPS` | [Video Workflow](#video-workflow), [Output Size](#output-size) |
+| Segments and heroes | `SEGMENT_ENABLED`, `SEGMENT_MAX_WORDS`, `SEGMENT_CONTINUE_FROM_LAST_FRAME`, `HERO_COMFYUI_WORKFLOW`, `HERO_COMPOSITE_MODE`, `HERO_COMPOSITE_BLEED_PX` | [Segmented Rendering](#segmented-rendering), [Hero Images](#hero-images) |
+| Tenancy, storage, logging | `ADMIN_API_KEY`, `ADMIN_TENANT_NAME`, `ADMIN_TENANT_SLUG`, `DATA_DIRECTORY`, `SEQ_LOGGING_BASE_URL`, `SEQ_LOGGING_API_KEY` | [Tenancy and Database](#tenancy-and-database), [Logging and Seq](#logging-and-seq) |
 
-DATA_DIRECTORY=data
+Keys the code reads that are not in `.env.example` because their defaults are normally right:
 
-NEWS_DEFAULT_WPM=145
-NEWS_CONTEXT_MAX_SENTENCES=80
-NEWS_CONTEXT_MIN_SENTENCE_CHARS=40
-NEWS_CONTEXT_RERANK_BACKEND=http
-NEWS_CONTEXT_RERANK_BASE_URL=
-NEWS_CONTEXT_RERANK_ENABLED=false
-NEWS_CONTEXT_RERANK_ENDPOINT=http://reranker-host:8007/v1/rerank
-NEWS_CONTEXT_RERANK_MODEL=bge-reranker-v2-m3
-NEWS_CONTEXT_RERANK_TIMEOUT_SECONDS=60
-NEWS_CONTEXT_RERANK_TOP_N=20
-NEWS_SOURCE_RANK_ENABLED=true
-NEWS_SOURCE_RANK_CANDIDATES=50
-NEWS_SOURCE_RANK_QUERY=artificial intelligence and technology news
-NEWS_CONTEXT_WINDOW_SENTENCES=0
-NEWS_INTENDED_VIDEO_MAX_SECONDS=30
-NEWS_OUTPUT_DIRECTORY=output
-NEWS_SUMMARIZE_PROMPT=
-NEWS_SUMMARIZE_PROMPT_FILE=prompts/generic-news-reporter.md
-NEWS_VIDEO_PROMPT=A medium close-up video of the person from the reference image speaking directly to camera. Preserve identity, face shape, hair, clothing, and background. Natural mouth movement, subtle head motion, realistic expression, stable camera.
-NEWS_VIDEO_PROMPT_FILE=
-NEWS_VIDEO_SOUND_PROMPT=Clear spoken narration, moderate volume, close to the microphone.
-
-OPENAI_API_KEY=
-OPENAI_BASE_URL=http://llm-host:11434/v1
-OPENAI_DEFAULT_TIMEOUT_SECONDS=90
-OPENAI_MODEL=your-chat-model
-OPENAI_REASONING_EFFORT=
-
-SEARXNG_BASE_URL=http://searxng-host:8888
-SEARXNG_DEFAULT_CATEGORIES=news,general
-SEARXNG_DEFAULT_LANGUAGE=en
-SEARXNG_DEFAULT_MAX_AGE_DAYS=3
-SEARXNG_DEFAULT_MAX_ARTICLES=5
-SEARXNG_DEFAULT_SAFESEARCH=1
-SEARXNG_DEFAULT_TIME_RANGE=
-SEARXNG_DEFAULT_TIMEOUT_SECONDS=20
-
-SEQ_LOGGING_API_KEY=
-SEQ_LOGGING_BASE_URL=http://seq-host:5341
+```text
+AVATAR_MAX_DIMENSION=1920              largest avatar side accepted on upload or generation
+DATABASE_URL=                          overrides DATA_DIRECTORY/news.db entirely
 LOG_DIR=logs
 LOG_LEVEL=INFO
-
-VIDEO_COMFYUI_BASE_URL=http://video-comfyui-host:8188
-VIDEO_COMFYUI_FPS=24
-VIDEO_COMFYUI_FREE_BEFORE_RUN=true
-VIDEO_COMFYUI_HEIGHT=704
-VIDEO_COMFYUI_OUTPUT_PREFIX=video/news-generator
-VIDEO_COMFYUI_PROMPT_ENHANCE=false
-VIDEO_COMFYUI_TIMEOUT_SECONDS=5400
-VIDEO_COMFYUI_WIDTH=1280
-VIDEO_COMFYUI_WORKFLOW=comfyui-workflows/video_ltx2_3_ia2v-working.json
+NEWS_API_KEY=                          the MCP stdio server's tenant key (falls back to the admin key)
+NEWS_CONTEXT_DEDUPE_ENABLED=true       near-duplicate evidence merge; NEWS_CONTEXT_DEDUPE_THRESHOLD=0.6
+NEWS_STORY_DEDUPE_ENABLED=true         same-story article dedupe; NEWS_STORY_DEDUPE_THRESHOLD=0.35
+NEWS_CONTEXT_RERANK_BASE_URL=          only with NEWS_CONTEXT_RERANK_BACKEND=ollama-embed
+NEWS_WORKER_ENABLED=true               false: this process only enqueues runs
+NEWS_SCHEDULER_ENABLED=true            false: no scheduler thread
+PREFLIGHT_TIMEOUT_SECONDS=5
+VOICE_STORAGE_PATH=assets/voices
 ```
+
+The standalone `scripts/generate_video_comfyui.py` reads its own `COMFYUI_BASE_URL`, `COMFYUI_DEFAULT_WORKFLOW`, `COMFYUI_DEFAULT_FPS`, `COMFYUI_DEFAULT_OUTPUT_PREFIX` and `COMFYUI_DEFAULT_TIMEOUT_SECONDS`; the pipeline does not use those.
 
 `VIDEO_COMFYUI_BASE_URL` and `AVATAR_COMFYUI_BASE_URL` are intentionally separate. Video generation can target the heavier DGX ComfyUI instance, while avatar generation can target a lighter local ComfyUI instance that has the turbo image workflow available.
 
@@ -152,7 +146,7 @@ VIDEO_COMFYUI_WORKFLOW=comfyui-workflows/video_ltx2_3_ia2v-working.json
 
 `VIDEO_COMFYUI_PROMPT_ENHANCE` sets the default for the workflow's prompt-enhancement switch. It fills the `{{PROMPT_ENHANCE}}` placeholder, so the template must carry that placeholder on the boolean node that drives the switch; the API `prompt_enhance` field and the CLI `--prompt-enhance` / `--no-prompt-enhance` flags override it per run.
 
-`VIDEO_COMFYUI_WIDTH` and `VIDEO_COMFYUI_HEIGHT` fix the final video size. 1280x704 is the workflow's native near-720p size; 1280x720 works but is produced by a re-encode. `AVATAR_DEFAULT_WIDTH` and `AVATAR_DEFAULT_HEIGHT` must also be 16:9; avatar generation rejects any other ratio. See [Output Size](#output-size).
+`VIDEO_COMFYUI_WIDTH` and `VIDEO_COMFYUI_HEIGHT` fix the final video size (code default 1280x720; `.env.example` sets 1280x704). 1280x704 is the workflow's native near-720p size; 1280x720 works but is produced by a re-encode. `AVATAR_DEFAULT_WIDTH` and `AVATAR_DEFAULT_HEIGHT` must also be 16:9; avatar generation rejects any other ratio. See [Output Size](#output-size).
 
 ## Service Topology
 
@@ -165,8 +159,9 @@ assumes two backends share a host, a GPU, or a network.
 | SearXNG | `SEARXNG_BASE_URL` | source search |
 | Script LLM | `OPENAI_BASE_URL` | script generation |
 | Reranker | `NEWS_CONTEXT_RERANK_ENDPOINT` | evidence ordering (optional) |
-| Chatterbox | `CHATTERBOX_BASE_URL` | narration audio |
-| Avatar ComfyUI | `AVATAR_COMFYUI_BASE_URL` | avatar image generation |
+| TTS server | `TTS_OPENAI_BASE_URL` | narration audio, voice library |
+| crawl4ai | `CRAWL4AI_API_URL` | article body extraction (optional) |
+| Avatar ComfyUI | `AVATAR_COMFYUI_BASE_URL` | avatar images and per-segment hero images |
 | Video ComfyUI | `VIDEO_COMFYUI_BASE_URL` | talking-head video |
 
 Avatar and video ComfyUI are deliberately separate variables. Point them at one
@@ -174,9 +169,9 @@ server to share it, or at two servers to keep image generation off the machine
 doing video, which is by far the largest consumer of memory.
 
 Where backends do share hardware, `VIDEO_COMFYUI_FREE_BEFORE_RUN=true` asks the
-video ComfyUI server to unload its models before a render. It is off by default,
+video ComfyUI server to unload its models before a render. The code default is off,
 because co-location is a deployment choice rather than something the pipeline
-should assume.
+should assume; `.env.example` turns it on for a single-box setup.
 
 Video memory scales with clip length: the workflow renders `duration * fps + 1`
 frames and holds them through upscale and decode. Clip length is the main lever
@@ -190,16 +185,7 @@ The app is intentionally endpoint-driven. The code does not require one vendor o
 
 The script generator calls an OpenAI-compatible chat completions endpoint configured by `OPENAI_BASE_URL` and `OPENAI_MODEL`.
 
-Current local default:
-
-```text
-OPENAI_BASE_URL=http://llm-host:11434/v1
-OPENAI_MODEL=your-chat-model
-```
-
-That points at Ollama's OpenAI-compatible `/v1/chat/completions` API.
-
-Alternative: llama.cpp can also serve OpenAI-compatible chat endpoints for supported chat/generation models. If using llama.cpp for the script LLM, point `OPENAI_BASE_URL` at that llama.cpp server's `/v1` base URL and set `OPENAI_MODEL` to the served model name.
+`.env.example` points at a llama.cpp `llama-server` (`OPENAI_BASE_URL=http://<mac-host>:8180/v1`) serving a dense chat model. Any server with the OpenAI chat-completions shape works: llama.cpp, vLLM, SGLang, or Ollama. `services/llm.py` detects which one it is talking to and sizes the context accordingly (see [LLM Context Window](#llm-context-window)). Set `OPENAI_MODEL` to the served model name and `OPENAI_REASONING_EFFORT` (for example `none`) if the model takes it.
 
 Do not point the script LLM at the BGE reranker model. The reranker is for scoring query/document pairs, not generating scripts.
 
@@ -286,7 +272,7 @@ Embedding-similarity fallback:
 
 ## Container Deployment
 
-The stack is two containers plus whatever GPU services you point it at: the app (API, worker, scheduler, admin UI, MCP over HTTP, with ffmpeg and the built React bundle inside the image) and SearXNG. ComfyUI stays native on its GPU box; Chatterbox, the reranker, crawl4ai, and the LLM run wherever they already run and are reached by URL. The image is a multi-stage build: Node builds `web/dist`, then a Python image installs ffmpeg and the app.
+The stack is two containers plus whatever GPU services you point it at: the app (API, worker, scheduler, admin UI, MCP over HTTP, with ffmpeg and the built React bundle inside the image) and SearXNG. ComfyUI stays native on its GPU box; the TTS server, the reranker, crawl4ai, and the LLM run wherever they already run and are reached by URL. The image is a multi-stage build: Node builds `web/dist`, then a Python image installs ffmpeg and the app.
 
 ```bash
 docker compose build
@@ -362,13 +348,22 @@ Configured by:
 VIDEO_COMFYUI_WORKFLOW=comfyui-workflows/video_ltx2_3_ia2v-working.json
 ```
 
-This file is the official ComfyUI **LTX-2.3: Image Audio to Video (IA2V)** template, exported in API format with the pipeline placeholders substituted for the literal values. Nothing else about it is modified.
+This file is the official ComfyUI **LTX-2.3: Image Audio to Video (IA2V)** template, exported in API format with the pipeline placeholders substituted for the literal values. Nothing else about it is modified. It is the proven baseline; the templates actually used today are derived from it:
+
+| Template | Difference from `-working.json` | Use |
+| --- | --- | --- |
+| `video_ltx2_3_ia2v-extend.json` | adds one `LTXVContextWindows` node between the LoRA loader and both CFG guiders (145-frame windows, 40 overlap) | CUDA host; renders a whole chunk without the transitions and fades the baseline shows past about 10 s |
+| `video_ltx2_3_ia2v-extend-mac.json` | extend + bf16 checkpoint and text encoder | Apple Silicon (MPS has no float8); too large to fit in 128 GB, see docs/mac/ |
+| `video_ltx2_3_ia2v-extend-mac-q8.json` | extend + GGUF loaders (`UnetLoaderGGUF`, `DualCLIPLoaderGGUF`, `VAELoader`) for Q8 files | Apple Silicon, the recipe in docs/mac/ that produced a correct clip |
+| `video_wan2_2_14B_s2v.json` | a different model family (Wan2.2 S2V, `WanSoundImageToVideo`) | parked: flat memory but 16 fps, looser lipsync, about 45 min per 31 s |
+
+The pipeline picks the code path by the template's node classes (`workflow_family` in `scripts/generate_video_comfyui.py`): a `WanSoundImageToVideo` node selects the Wan stage, any `LTXV*` node the LTX stage. Keep the LTX copies in step when the template changes.
 
 #### The narration WAV is the soundtrack
 
 In the official IA2V template the uploaded WAV goes `LoadAudio -> TrimAudioDuration -> LTXVAudioVAEEncode -> SetLatentNoiseMask -> LTXVConcatAVLatent` into the first sampler pass. The audio latent is masked so it is never regenerated. The video's soundtrack is the narration, and the mouth is driven by it. This is what makes lip sync exact and makes the video end where the narration ends.
 
-`comfyui-workflows/video_ltx2_3_ia2v-good-test.json` is **not** that template and must not be used for narrated video. It carries two nodes the official template does not have: `LTXVReferenceAudio`, which per the ComfyUI node documentation transfers only the speaker's voice identity to *generated* audio, and `LTXVEmptyLatentAudio`, which starts the first pass from a blank audio latent. In that variant the model speaks the `[SPEECH]` text of the prompt itself, at its own pace, in a voice cloned from the WAV. Symptoms: the video babbles when the script is not in the prompt, trailing sounds in the WAV do not appear in the video, and long scripts get cut off mid-sentence because the model talks slower than Chatterbox did.
+Do not use a template built from LTX's reference-audio variant for narrated video. That variant carries two nodes the official template does not have: `LTXVReferenceAudio`, which per the ComfyUI node documentation transfers only the speaker's voice identity to *generated* audio, and `LTXVEmptyLatentAudio`, which starts the first pass from a blank audio latent. With it the model speaks the `[SPEECH]` text of the prompt itself, at its own pace, in a voice cloned from the WAV. Symptoms: the video babbles when the script is not in the prompt, trailing sounds in the WAV do not appear in the video, and long scripts get cut off mid-sentence because the model talks slower than the TTS did. (Such a template was tried early on and has since been removed from the repository.)
 
 The pipeline and the CLI both run `validate_video_workflow` on the template before every render. It refuses a template that is missing placeholders, contains `LTXVReferenceAudio` or `LTXVEmptyLatentAudio`, or whose `LTXVAudioVAEEncode` output does not reach a `LTXVConcatAVLatent.audio_latent` input. The error names the problem. Do not bypass it; fix the template.
 
@@ -389,7 +384,7 @@ ltx-2.3-spatial-upscaler-x2-1.1.safetensors
 ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors
 ```
 
-`comfyui-workflows/video_ltx2_3_ia2v-extend-mac.json` is the same template for ComfyUI on Apple Silicon. MPS has no float8 type, so the fp8 checkpoint and the fp4 text encoder fail to load there; the Mac copy names the bf16 files instead (`ltx-2.3-22b-dev.safetensors` from Lightricks/LTX-2.3, 46 GB, and `gemma_3_12B_it.safetensors` from Comfy-Org/ltx-2, 24 GB). The two LoRAs and the upscaler are already bf16 and are shared. Nothing else differs; keep the two files in step when the template changes.
+`comfyui-workflows/video_ltx2_3_ia2v-extend-mac.json` is the extend template for ComfyUI on Apple Silicon. MPS has no float8 type, so the fp8 checkpoint and the fp4 text encoder fail to load there; the Mac copy names the bf16 files instead (`ltx-2.3-22b-dev.safetensors` from Lightricks/LTX-2.3, 46 GB, and `gemma_3_12B_it.safetensors` from Comfy-Org/ltx-2, 24 GB). The two LoRAs and the upscaler are already bf16 and are shared. That combination loads but does not fit in 128 GB through the second pass; `video_ltx2_3_ia2v-extend-mac-q8.json` swaps the loaders for GGUF nodes and Q8 files and is the one that works. The measurements and the model files are in [docs/mac/README.md](docs/mac/README.md).
 
 Required custom node families/classes include:
 
@@ -518,7 +513,9 @@ For news-video generation, `news,general` is the practical default: `news` keeps
 
 With `NEWS_SOURCE_RANK_ENABLED=true`, search selects up to `NEWS_SOURCE_RANK_CANDIDATES` results that pass the age rule and de-duplication, sends each one's title and snippet to the `NEWS_CONTEXT_RERANK_ENDPOINT` cross-encoder with `NEWS_SOURCE_RANK_QUERY` as the query, and keeps the top `max_articles` in descending score order. The CLI accepts `--rank-query` and `--rank-candidates` overrides. The API has no per-request field; ranking is environment-controlled.
 
-Runs from a profile rank by the profile's `rank_query`, or by its search terms when that is blank. The bundle records `candidate_count`, a `source_rank` block (endpoint, model, query, counts, and any degradation error), and a `source_rank_score` on each selected source. If the rerank endpoint fails, the run continues with the first `max_articles` candidates in search order and `source_rank.degraded` is `true`.
+Runs from a profile rank by the profile's `rank_query`, or by its search terms when that is blank, and `rank_candidates` overrides the candidate count. The bundle records `candidate_count`, a `source_rank` block (endpoint, model, query, counts, and any degradation error), and a `source_rank_score` on each selected source. If the rerank endpoint fails, the run continues with the first `max_articles` candidates in search order and `source_rank.degraded` is `true`.
+
+Selection also skips articles that cover the same story. `NEWS_STORY_DEDUPE_ENABLED` (default on) compares each ranked candidate with the ones already selected by cosine similarity on stopword-free term frequencies of title plus text; a pair above `NEWS_STORY_DEDUPE_THRESHOLD` (default 0.35) is the same story. The loop keeps walking the ranked pool until `max_articles` distinct stories are found. Same-story articles land in `duplicate_sources` with `duplicate_of`, the kept article records `also_reported_by`, their sentences still become evidence tagged with the story, and the summarize prompt is asked to tell the story once and credit the outlets together.
 
 ## 2. Generate Script
 
@@ -674,11 +671,15 @@ NEWS_CONTEXT_WINDOW_SENTENCES
 
 `NEWS_CONTEXT_RERANK_TOP_N` is the default number of evidence units kept after reranking. API calls can override it with `rerank_top_n`, matching the existing pattern where `max_articles` overrides `SEARXNG_DEFAULT_MAX_ARTICLES` for a run.
 
-The implementation protects common abbreviations before sentence segmentation, splits on sentence boundaries, restores abbreviation periods, then keeps only clean complete sentences. Page fetching remains a future enhancement; the current implementation builds evidence from selected SearXNG result snippets and keeps result titles as metadata.
+The implementation protects common abbreviations before sentence segmentation, splits on sentence boundaries, restores abbreviation periods, then keeps only clean complete sentences. Evidence comes from the article body when [crawl4ai extraction](#article-extraction-crawl4ai) succeeds and from the SearXNG snippet otherwise; result titles are kept as metadata.
+
+After reranking, near-duplicate evidence units are merged: with `NEWS_CONTEXT_DEDUPE_ENABLED` (default on) the reranker is asked for a pool of twice `top_n`, units whose word sets overlap above `NEWS_CONTEXT_DEDUPE_THRESHOLD` (Jaccard, default 0.6) collapse into one that carries `also_reported_by`, and the prompt renders that as "Also reported by" so the writer credits the outlets together instead of repeating the claim.
 
 ## 3. Generate Audio
 
-Audio generation uses Chatterbox and requires an explicit `--voice`.
+Audio generation goes through `services/tts.py`, the one TTS client. The server is OpenAI-compatible: `/v1/audio/speech` for synthesis and `/v1/audio/voices` for the voice library (list, upload a sample with a consent id, delete), such as vLLM-Omni or mlx serving Qwen3-TTS. Configured by `TTS_OPENAI_BASE_URL` (ends in `/v1`), `TTS_OPENAI_MODEL`, `TTS_OPENAI_API_KEY`, `TTS_OPENAI_TIMEOUT_SECONDS`. Preflight, system info and logs name the service `tts_openai`. The Chatterbox provider was removed; a leftover `TTS_PROVIDER=chatterbox` in `.env` is refused with a message. After synthesis the pipeline trims a trailing burst: a short sound after a pause at the very end of a narration (a TTS artifact) is cut off with a stream copy.
+
+The CLI requires an explicit `--voice`.
 
 Existing library voice:
 
@@ -692,9 +693,9 @@ Existing library voice:
 Voice rules:
 
 1. `--voice` is required.
-2. The script never implicitly uses Chatterbox's API/file-system default voice.
+2. The script never implicitly uses the TTS server's default voice.
 3. If no `--voice-sample` is provided, `--voice` must already exist in `GET /voices`.
-4. If `--voice-sample` is provided and `--voice` exists, the script deletes that Chatterbox library voice and uploads the new sample under the same name.
+4. If `--voice-sample` is provided and `--voice` exists, the script deletes that library voice and uploads the new sample under the same name.
 5. If `--voice-sample` is provided and `--voice` does not exist, the script uploads the sample under that name.
 6. After resolving or replacing the library voice, the script calls `POST /audio/speech` with the explicit `voice` field.
 
@@ -721,7 +722,7 @@ size_bytes=...
 
 ## 4. Generate Video
 
-Video generation sends the image and narration WAV to ComfyUI, patches the workflow placeholders, queues the prompt, waits for history, and downloads the output media.
+Video generation sends the image and narration WAV to ComfyUI, patches the workflow placeholders, queues the prompt, waits for history, and downloads the output media. The standalone script reads `COMFYUI_BASE_URL` and the `COMFYUI_DEFAULT_*` keys listed under [Environment](#environment), not the `VIDEO_COMFYUI_*` keys the pipeline uses.
 
 ```bash
 .venv/bin/python scripts/generate_video_comfyui.py \
@@ -784,7 +785,7 @@ The standalone `scripts/generate_video_comfyui.py` still copies the input image'
 
 ### Run Log
 
-Every pipeline run appends timestamped lines to `run.log` in the run directory, tagged by stage (`run`, `search`, `evidence`, `script`, `audio`, `video`): the SearXNG request URL and counts, each selected source with its rank score, evidence rerank details, the LLM model and word counts, the resolved voice and narration duration, the ComfyUI prompt id, upload names, output file, final size, and any stage error. The same lines go to the `news_pipeline` Python logger, so they appear on the API server console.
+Every pipeline run appends timestamped lines to `run.log` in the run directory, tagged by stage (`run`, `preflight`, `search`, `extract`, `evidence`, `script`, `images`, `audio`, `video`): the SearXNG request URL and counts, each selected source with its rank score, evidence rerank details, the LLM model and word counts, the resolved voice and narration duration, the ComfyUI prompt id, upload names, output file, final size, and any stage error. The same lines go to the `news_pipeline` Python logger, so they appear on the API server console.
 
 ## Full Example
 
@@ -825,7 +826,7 @@ The intended implementation layers are:
 ```text
 services/       shared pipeline, evidence, voices, and avatar logic
 api/            FastAPI production HTTP API
-mcp_server/     future MCP tools that call the shared service layer
+mcp_server/     MCP tools that call the shared service layer
 scripts/        CLI entrypoints and reusable low-level pipeline helpers
 ```
 
@@ -871,6 +872,8 @@ avatar_name + avatar_prompt: generate or replace a stored avatar, then use it
 ```
 
 If `anchor_image_file` is provided, it is used for that run. Otherwise, `avatar_name` must refer to a stored avatar. If `avatar_prompt` is supplied with `avatar_name`, the API generates or replaces the stored avatar first, then uses it as the run anchor image.
+
+`/generate` runs synchronously in the request, acts on the admin tenant, and uses the same segmented narration and rendering as queued runs, but skips the hero-image stage. For queued, tenant-scoped runs with heroes use `POST /api/v1/runs` below.
 
 Optional upload:
 
@@ -919,8 +922,9 @@ OPENAI_BASE_URL
 OPENAI_MODEL
 OPENAI_API_KEY
 OPENAI_DEFAULT_TIMEOUT_SECONDS
-CHATTERBOX_BASE_URL
-CHATTERBOX_DEFAULT_TIMEOUT_SECONDS
+TTS_OPENAI_BASE_URL
+TTS_OPENAI_MODEL
+TTS_OPENAI_API_KEY
 VIDEO_COMFYUI_BASE_URL
 AVATAR_COMFYUI_BASE_URL
 AVATAR_COMFYUI_WORKFLOW
@@ -960,7 +964,7 @@ Error response:
 {
   "status": "error",
   "run_id": "string or null",
-  "stage": "request | search | script | audio | video",
+  "stage": "request | preflight | search | script | images | audio | video",
   "message": "string"
 }
 ```
@@ -986,7 +990,7 @@ POST /avatars/{avatar_name}/upload
 POST /avatars/generate
 ```
 
-`GET /voices` queries Chatterbox using `CHATTERBOX_BASE_URL` and returns the currently available library voice names and aliases. It is a discovery endpoint only; it does not define or imply a default voice fallback.
+`GET /voices` queries the TTS server and returns the currently available library voice names and aliases. It is a discovery endpoint only; it does not define or imply a default voice fallback.
 
 Avatar endpoints store canonical PNG files under `AVATAR_STORAGE_PATH`. Relative paths resolve from the repository root. `POST /avatars/{avatar_name}/upload` accepts multipart field `file`, validates the image with Pillow, converts it to PNG, and writes `{avatar_name}.png` plus `{avatar_name}.json` metadata. If `AVATAR_API_KEY` is set, upload requires either `Authorization: Bearer <key>` or `X-API-Key: <key>`.
 
@@ -994,7 +998,7 @@ Avatar endpoints store canonical PNG files under `AVATAR_STORAGE_PATH`. Relative
 
 ## Tenancy and Database
 
-The app keeps tenant-scoped state in SQLite at `DATA_DIRECTORY/news.db` (default `data/`, gitignored). `DATABASE_URL` overrides the location entirely. Tables are created on startup; there is no migration tool yet.
+The app keeps tenant-scoped state in SQLite at `DATA_DIRECTORY/news.db` (default `data/`, gitignored). `DATABASE_URL` overrides the location entirely. The schema is created on startup and kept current by numbered migrations; see [Database Migrations](#database-migrations).
 
 `.env` is system control: service endpoints, storage paths, output size, and the admin tenant. On every start the app ensures the admin tenant exists (`ADMIN_TENANT_SLUG`, `ADMIN_TENANT_NAME`) and that its bootstrap API key matches `ADMIN_API_KEY`, falling back to `AVATAR_API_KEY` so an existing installation keeps its key. Changing `ADMIN_API_KEY` revokes the previous bootstrap key on the next start. All other tenants, their keys, prompts, profiles, avatars, voices, schedules, and runs live only in the database.
 
@@ -1009,26 +1013,30 @@ POST   /api/v1/voices                   multipart: name, sample (wav), language,
 GET    /api/v1/voices/{name}
 GET    /api/v1/voices/{name}/sample     the stored sample wav
 DELETE /api/v1/voices/{name}
+GET    /api/v1/library-voices/{name}/sample   a short sample of any voice in the TTS server's library, synthesized per request, nothing stored
 
 GET    /api/v1/avatars                  list (limit, cursor)
 POST   /api/v1/avatars/generate         form: name, prompt, negative_prompt, width, height, seed, replace
 POST   /api/v1/avatars/upload           multipart: name, image, replace
+GET    /api/v1/avatars/options          image templates on disk, default template, default hero template, negative prompt, default size
 GET    /api/v1/avatars/{name}
 GET    /api/v1/avatars/{name}/image     the png
 DELETE /api/v1/avatars/{name}
 
-GET    /api/v1/prompts                  the global default prompts (summarize, video_visual, video_sound) with body, path, updated_at
+GET    /api/v1/prompts                  the global default prompts (summarize, video_visual, video_sound, hero_image) with body, path, updated_at
 GET    /api/v1/prompts/{kind}           body, path, editable, variables
 PUT    /api/v1/prompts/{kind}           form: body; rewrites the default file; admin tenant only
-POST   /api/v1/prompts/{kind}/test      form: search_text, max_articles; runs search and script only with the default summarize prompt
+POST   /api/v1/prompts/{kind}/test      form: search_text, max_articles; kind must be summarize; runs search and script only, no run is queued
 
 POST   /api/v1/runs                     json: profile_id, overrides, priority, wait; 202 with the queued run
 GET    /api/v1/runs                     list newest first (status, profile_id, limit, cursor)
 GET    /api/v1/runs/{id}                status, stage, timings, error, preflight, artifacts, metrics, selected_sources
 POST   /api/v1/runs/{id}/cancel
+DELETE /api/v1/runs/{id}              remove the run and its directory
 POST   /api/v1/runs/{id}/retry          202 with a new run resuming from the failed stage
-GET    /api/v1/runs/{id}/files/{artifact}       the file: video, audio, narration, sources, report, log, preflight
+GET    /api/v1/runs/{id}/files/{artifact}       the file: video, audio, narration, sources, report, log, preflight, chunks
 GET    /api/v1/runs/{id}/files/{artifact}/info  url, size, content_type; ?inline=true adds text content
+GET    /api/v1/runs/{id}/chunks/{index}/hero/image   the hero png of one segment
 
 GET    /api/v1/schedules                list
 POST   /api/v1/schedules                json: profile_id, cron, enabled, name, timezone
@@ -1045,10 +1053,12 @@ DELETE /api/v1/tenants/{slug}/keys/{id} admin only: revoke
 PUT    /api/v1/tenants/{slug}/active    admin only: json active
 
 GET    /api/v1/search/options           SearXNG categories and the .env defaults profile fields fall back to
-POST   /api/v1/search/preview           json: search_text, categories, language, max_articles, max_age_days, rank_query; the articles a run would select, no LLM, no run
+POST   /api/v1/search/preview           json: search_text, categories, language, max_articles, max_age_days, rank_query, rank_candidates, extract; the articles a run would select, no LLM, no run; extract=true also fetches each through crawl4ai and reports words extracted
 
 GET    /api/v1/profiles                 list (limit, cursor)
-POST   /api/v1/profiles                 json: name, search_text, and any other profile field
+POST   /api/v1/profiles                 json: name, search_text, and any other profile field: categories, language, safesearch, max_articles, max_age_days,
+                                        rank_query, rank_candidates, voice, avatar, intended_video_max_seconds, wpm, summarize_prompt, video_visual_prompt,
+                                        video_sound_prompt, hero_prompt, hero_workflow (a new profile is filled from the default prompt files)
 GET    /api/v1/profiles/{id}
 PUT    /api/v1/profiles/{id}            json: fields to change
 DELETE /api/v1/profiles/{id}            conflict if a schedule references it
@@ -1056,11 +1066,11 @@ DELETE /api/v1/profiles/{id}            conflict if a schedule references it
 
 Every error from these routes has one shape: `{"error": {"code", "stage", "message"}}` with codes `not_found` (404), `conflict` (409), `invalid` (400), `unauthorized` (401), `forbidden` (403, admin-only operation), `preflight_failed` (503), `pipeline_failed` (500), `service_unavailable` (503). Every write is recorded in `audit_events` with the acting key, the object, and its before and after state.
 
-Runs and the worker: `POST /api/v1/runs` queues a run and returns immediately; a worker thread in the API process executes queued runs one at a time, oldest first by priority, through preflight, search and script, audio, and video, updating `status` and `stage` on the run as it goes. Runs use the tenant's prompts, the tenant's voice (falling back to a pre-existing Chatterbox voice of the same name) and avatar (falling back to `assets/avatars/<name>.png`), and write under `output/<tenant>/<run_id>/`. `cancel` ends a queued run at once and asks a running one to stop between stages, interrupting ComfyUI if the video stage is active. `retry` queues a new run that resumes from the failed stage in the same directory. Runs left in progress by a restart are marked failed. `NEWS_WORKER_ENABLED=false` disables the worker (for a process that should only enqueue). The MCP server enqueues but does not execute; the API must be running.
+Runs and the worker: `POST /api/v1/runs` queues a run and returns immediately; a worker thread in the API process executes queued runs one at a time, oldest first by priority, through the stages `preflight`, `search`, `script`, `images` (one hero per segment), `audio`, and `video`, updating `status` and `stage` on the run as it goes. Runs use the profile's prompts (summarize, video visual, video sound, hero), the tenant's voice (falling back to a voice of the same name in the TTS server's shared library) and avatar (falling back to `assets/avatars/<name>.png`), and write under `output/<tenant>/<run_id>/`. The `overrides` object of `POST /api/v1/runs` accepts any profile field for that one run. `cancel` ends a queued run at once and asks a running one to stop between stages, interrupting ComfyUI if the video stage is active. `retry` queues a new run that resumes from the failed stage in the same directory. Runs left in progress by a restart are marked failed. `NEWS_WORKER_ENABLED=false` disables the worker (for a process that should only enqueue). The MCP server enqueues but does not execute; the API must be running.
 
 Schedules: a five-field cron expression bound to a profile, evaluated in the schedule's timezone (default UTC). A scheduler thread in the API process checks every fifteen seconds for enabled schedules whose `next_run_at` has passed, runs the cached preflight once per pass, skips the fire with a recorded `last_error` when a hard check fails or the tenant is inactive, otherwise enqueues the profile exactly as `POST /api/v1/runs` would with actor `scheduler`, then advances `next_run_at`. `last_run_id` and `last_run_at` show what a schedule last produced. `NEWS_SCHEDULER_ENABLED=false` disables the thread.
 
-Tenant storage: avatars under `assets/avatars/<tenant>/`, voice samples under `assets/voices/<tenant>/` (`VOICE_STORAGE_PATH` overrides the root), and Chatterbox library names prefixed `<tenant>-`. Prompts are seeded per tenant from the repository files and `.env` values on first access; `default_body` always reflects the current file so a tenant can see and reset to it. Until the runs step, `/generate` and the other pre-existing routes still read the prompt files directly.
+Tenant storage: avatars under `assets/avatars/<tenant>/`, voice samples under `assets/voices/<tenant>/` (`VOICE_STORAGE_PATH` overrides the root), and TTS library names prefixed `<tenant>-`. Prompts are seeded per tenant from the repository files and `.env` values on first access; `default_body` always reflects the current file so a tenant can see and reset to it. Until the runs step, `/generate` and the other pre-existing routes still read the prompt files directly.
 
 The MCP server resolves its tenant from `NEWS_API_KEY` in its environment, falling back to the admin bootstrap key, and exposes `get_system_info` alongside `preflight`.
 
@@ -1080,14 +1090,14 @@ npm install
 npm run build      # writes web/dist; the API picks it up on next start
 ```
 
-Develop with hot reload (the API on :8000, Vite on :5173 proxying `/api`, `/health`, and `/mcp`):
+Develop with hot reload (Vite on :5173 proxying `/api`, `/health`, `/mcp` and `/voices` to the API on :8020, so start uvicorn with `--port 8020` for dev):
 
 ```bash
 cd web
 npm run dev
 ```
 
-Screens: dashboard (service checks, system, recent runs), runs (list, filters, run now from a profile), run detail (video, narration, script, sources, preflight, log, cancel, retry), profiles, schedules, prompts, avatars, voices, and tenants for the admin tenant. `web/node_modules` and `web/dist` are gitignored; build on deploy.
+Screens: dashboard (service checks, system, recent runs), runs (list, filters, run now from a profile), run detail (video, narration, a Segments panel with each chunk's hero image and status, script, sources, preflight, log, cancel, retry, delete), profiles (every profile field including the four prompts, the hero image template dropdown, and a search preview with an optional article-extraction test), schedules, avatars (template dropdown from `comfyui-workflows/avatar/`), voices (tenant voices, and the TTS server's shared library with a play button per voice), and for the admin tenant only prompts and tenants. `web/node_modules` and `web/dist` are gitignored; build on deploy.
 
 ## ffmpeg
 
@@ -1106,13 +1116,31 @@ brew install ffmpeg
 sudo apt-get install -y ffmpeg
 ```
 
-Verify with `ffmpeg -version` and `ffprobe -version` in a new shell. Preflight reports `local: warn` when either is missing; runs still complete but without size verification or chunk stitching, so treat the warning as a hard requirement once segmented rendering is on.
+Verify with `ffmpeg -version` and `ffprobe -version` in a new shell. Preflight reports `local: warn` when either is missing; segmented rendering is on by default and cannot assemble a video without them, so treat the warning as a hard requirement.
 
 ## Segmented Rendering
 
-Every script, whatever its length and however many articles it covers, is split at sentence boundaries into chunks of at most `SEGMENT_MAX_WORDS` (default 100, about 40 seconds of narration). Each chunk is narrated on its own (`chunks/NN/narration.wav`), rendered on its own through the unchanged video stage (`chunks/NN/video.mp4`), and the clips are appended with ffmpeg into the run's `video.mp4`; the narrations are appended into `narration.wav` the same way. `chunks.json` in the run directory is the manifest: text, word count, narration and clip durations, and status per chunk.
+Every script, whatever its length and however many articles it covers, is split at sentence boundaries into chunks of at most `SEGMENT_MAX_WORDS` (code default 100; `.env.example` sets 40, about 15 seconds of narration). Each chunk is narrated on its own (`chunks/NN/narration.wav`), rendered on its own through the video stage (`chunks/NN/video.mp4`), optionally composited with its hero image (`chunks/NN/composited.mp4`, see [Hero Images](#hero-images)), and the clips are appended with ffmpeg into the run's `video.mp4`; the narrations are appended into `narration.wav` the same way. `chunks.json` in the run directory is the manifest: text, word count, narration and clip durations, hero status and prompt, and status per chunk. It is served as the `chunks` artifact. `hero-placement.json` beside it records where the heroes are painted (see [Hero Images](#hero-images)).
 
-This is the memory bound for the DGX: a single 94-second render reached 111.9 GB of 121.7 GB on the Spark and had to be interrupted, while renders under about 40 seconds stayed near 90 GB. With chunks, no render exceeds the chunk size no matter what the LLM wrote, so the word cap in the prompt is a quality target rather than a safety mechanism. Chunks whose clip already exists are reused, so a retry after a failure at chunk four renders only chunks four and up; cancel is honored between chunks. Transitions (title cards, crossfades) are a later step; today the clips are appended with a straight cut. `SEGMENT_ENABLED=false` restores single-clip rendering.
+This is the memory bound for the GPU: with the baseline LTX template a single 94-second render reached 112 GB on a 128 GB DGX Spark and had to be interrupted, 31 seconds peaked at 101 GB. With chunks, no render exceeds the chunk size no matter what the LLM wrote, so the word cap in the prompt is a quality target rather than a safety mechanism. Chunks whose clip already exists are reused, so a retry after a failure at chunk four renders only chunks four and up; cancel is honored between chunks. Transitions (title cards, crossfades) are not implemented; the clips are appended with a straight cut. `SEGMENT_ENABLED=false` restores single-clip rendering and disables hero images.
+
+Knobs around the chunk loop:
+
+- `SEGMENT_CONTINUE_FROM_LAST_FRAME` (code default false; `.env.example` sets true): on, each chunk's render starts from the last frame of the previous chunk, so the clips play as one continuous take at the cost of possible identity drift over a long run. Off, every chunk restarts from the anchor image and the presenter snaps back to the reference pose at each cut. The continuous path is a separate copy of the render loop (`segments.render_chunks_continuous`).
+- `VIDEO_LTX_TAIL_PAD_SECONDS` (default 0.5): LTX fades the last frames of a clip, so each chunk is rendered this much past its narration and trimmed back to the narration length after download. `0` disables.
+- The Wan2.2 S2V path: pointing `VIDEO_COMFYUI_WORKFLOW` at `comfyui-workflows/video_wan2_2_14B_s2v.json` selects `generate_video_stage_wan`, which renders 77-frame segments at `VIDEO_WAN_S2V_FPS` (16) and size `VIDEO_WAN_S2V_WIDTH` x `VIDEO_WAN_S2V_HEIGHT`, chains them to cover the narration, uses the plain visual prompt (no `[VISUAL]/[SPEECH]/[SOUNDS]` wrapper), and trims the output to the narration. Memory stays flat but the result is choppier and slower than LTX; it is parked.
+
+## Hero Images
+
+When the anchor image has a chroma-green panel (a studio monitor painted `#0EF50F`, at least a 5% by 5% patch of dense green), the `images` stage of a queued run generates one hero image per chunk and composites it into that panel. The LLM is given the profile's `hero_prompt` (default `prompts/hero-image.md`, prompt kind `hero_image`), the segment text and the run's source titles, and returns an image prompt; the image is rendered through the avatar ComfyUI server (`AVATAR_COMFYUI_BASE_URL`) with the template named by the profile's `hero_workflow`, else `HERO_COMFYUI_WORKFLOW`, else `AVATAR_COMFYUI_WORKFLOW`, at the panel's measured size. A chunk whose hero fails falls back to a headline card built from the matching source title. The stage is skipped, with a log line, when the anchor has no panel, segmenting is off, or there is no hero prompt. Hero images are reused on retry and shown on the run detail page.
+
+Compositing (`HERO_COMPOSITE_MODE`):
+
+- `fixed` (default): the panel is measured once per run and the hero is painted at that exact quad on every frame of every chunk, so it never moves or resizes. The quad comes from the green corners on the first frame of the first composited clip (the anchor as the model drew it), or from the anchor's panel box when no plausible quad is found there, and is recorded in `hero-placement.json` in the run directory. Every later chunk, and a retry, reuses the recorded quad. The hero fills the quad shape (no green key), grown by `HERO_COMPOSITE_BLEED_PX`, so anything the model draws in front of the panel is painted over, and a camera move leaves the hero where it was.
+- `key`: a per-frame green key with tracking. The panel's corners are measured in every frame of the clip, the hero is perspective-warped onto them, and only the panel's window is keyed, so the hero follows the panel through pans, push-ins and off-frame corners.
+- `locked`: fills the measured panel shape and holds it still when the camera does; when the measured corners jitter more than a few pixels it falls back to tracking with a dead zone, which is the small movement `fixed` was added to remove.
+
+`HERO_COMPOSITE_BLEED_PX` (default 4) grows the hero past the measured edge in the fixed and locked modes so no green peeks out; too much paints over the bezel.
 
 ## Article Extraction (crawl4ai)
 
@@ -1162,7 +1190,7 @@ Seq is enabled by `SEQ_LOGGING_BASE_URL` and `SEQ_LOGGING_API_KEY`; when either 
 
 ## Preflight and Deep Health
 
-Every run begins with a preflight in `services/preflight.py` before any stage starts. It checks, in parallel with five-second timeouts: SearXNG (reachable, JSON format enabled, engines exist for the configured categories), the LLM (`OPENAI_MODEL` is served), the reranker (soft: a failure only degrades ranking to lexical), Chatterbox (model loaded, and the run's voice exists in its library), ComfyUI video (reachable, queue depth, `VIDEO_COMFYUI_WORKFLOW` passes `validate_video_workflow`, the anchor image exists), and local prerequisites (ffmpeg and ffprobe on PATH, output directory writable, free disk).
+Every run begins with a preflight in `services/preflight.py` before any stage starts. It checks, in parallel with five-second timeouts: SearXNG (reachable, JSON format enabled, engines exist for the configured categories), the LLM (`OPENAI_MODEL` is served, context window read), the reranker (soft: a failure only degrades ranking to lexical), the TTS server (reachable, and the run's voice exists in its library), crawl4ai (soft; reports ok when extraction is disabled, warn when the server or token is wrong), ComfyUI video (reachable, queue depth, `VIDEO_COMFYUI_WORKFLOW` passes `validate_video_workflow`, the anchor image exists), ComfyUI avatar (a check exists behind `need_avatar`, but no caller sets it today, so the avatar server is not preflighted), and local prerequisites (ffmpeg and ffprobe on PATH, output directory writable, free disk).
 
 Each check is logged as a `[preflight]` line in `run.log` and the full result is written to `preflight.json` in the run directory. Any hard failure ends the run at stage `preflight` with a message naming every failed service, and nothing is generated. Results are cached for thirty seconds. `PREFLIGHT_TIMEOUT_SECONDS` overrides the per-check timeout.
 
@@ -1181,11 +1209,11 @@ The pipeline should be validated in small production slices before full video ge
 
 ```text
 1. request accepted: FastAPI imports, health endpoint, route registration
-2. voices listed: GET /voices reaches Chatterbox and returns available voice names
-3. avatar generated or reused: future avatar endpoints create and retrieve a stored image
-4. search made: search stage writes sources.json from SearXNG
+2. voices listed: GET /voices reaches the TTS server and returns available voice names
+3. avatar generated or reused: the avatar endpoints create and retrieve a stored image
+4. search made: search stage writes sources.json from SearXNG (and articles/NN.md when crawl4ai extracts)
 5. summary created: script stage writes narration.txt and report.md within the word cap
-6. audio created: Chatterbox writes narration.wav with the explicit named voice
+6. audio created: the TTS server writes narration.wav with the explicit named voice
 7. video created: ComfyUI writes video.mp4 from the selected avatar/image and narration WAV
 ```
 
@@ -1209,13 +1237,14 @@ It creates a run directory and returns `run_id`, `script_url`, `report_url`, `so
 `POST /stages/audio` accepts:
 
 ```text
-voice: required Chatterbox voice name
+voice: required TTS library voice name
 script_text: optional direct script
+search_text: optional; runs search and script first, then audio
 run_id: optional existing run with narration.txt
 voice_sample_file: optional WAV upload
 ```
 
-It writes `narration.wav` and returns `audio_url`, `audio_duration_seconds`, `audio_size_bytes`, `voice`, and `voice_mode`. Provide either `script_text` or a `run_id` that already has `narration.txt`.
+It writes `narration.wav` and returns `audio_url`, `audio_duration_seconds`, `audio_size_bytes`, `voice`, and `voice_mode`. Provide `script_text`, `search_text`, or a `run_id` that already has `narration.txt`.
 
 `POST /stages/video` accepts:
 
@@ -1254,7 +1283,7 @@ preflight(voice?, avatar_name?)   verify every dependency; same result as GET /h
 get_system_info()                 version, video settings, configured services, storage
 list_voices, get_voice, upload_voice(name, sample_path), delete_voice
 list_avatars, get_avatar, generate_avatar, upload_avatar(name, image_path), delete_avatar
-list_prompts, get_prompt, update_prompt (admin), test_prompt(search_text)
+list_prompts, get_prompt, update_prompt (admin), test_prompt(kind=summarize, search_text, max_articles)
 list_search_profiles, get_search_profile, upsert_search_profile, delete_search_profile
 enqueue_run, get_run, list_runs, cancel_run, retry_run, get_run_file
 list_schedules, upsert_schedule, delete_schedule, run_schedule_now
@@ -1262,14 +1291,12 @@ preview_search, get_search_options
 list_tenants, create_tenant, list_api_keys, create_api_key, revoke_api_key, set_tenant_active   (admin only)
 ```
 
-File-taking tools accept a path on the server host, since stdio clients run locally. Errors carry the catalog error shape serialized in the tool error message.
-
-Remaining catalog tools are added phase by phase. Tool results return structured run metadata and artifact links, never embedded media. The streamable HTTP transport, mounted on the FastAPI app with bearer-key auth, arrives with the tenancy phase.
+File-taking tools accept a path on the server host, since stdio clients run locally. Errors carry the catalog error shape serialized in the tool error message. Tool results return structured run metadata and artifact links, never embedded media. `upsert_search_profile` does not yet take the per-profile prompt or hero fields; set those through the REST route or the admin UI.
 
 ## Notes
 
 - The pipeline should remain generic; avoid hardcoding topics, prompts, voices, or assets in scripts.
-- Use filesystem artifacts for v1. Add SQLite or Postgres only if a run index or historical search becomes necessary.
+- Run artifacts live on the filesystem under `output/`; the SQLite database holds tenants, keys, profiles, schedules, run records and audit events, never media.
 - YouTube publishing is not part of the current implemented flow.
 
 ## License

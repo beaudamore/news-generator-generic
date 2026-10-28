@@ -10,7 +10,8 @@ Layout inside a run directory:
   chunks/NN/narration.wav     per-chunk narration
   chunks/NN/video.mp4         per-chunk render
   chunks/NN/hero.png          optional support image for the chunk (any of hero.png/.jpg/.jpeg/.webp)
-  chunks/NN/composited.mp4    the render with the hero keyed into the anchor's green panel
+  chunks/NN/composited.mp4    the render with the hero placed on the anchor's green panel
+  hero-placement.json         the panel quad the heroes are placed on (HERO_COMPOSITE_MODE=fixed), measured once per run
   narration.wav               all chunk narrations appended (for the audio artifact)
   video.mp4                   all chunk renders appended
 """
@@ -498,8 +499,9 @@ def composite_hero(clip: Path, hero: Path, anchor: Path, target: Path, bleed: fl
 
 
 def hero_composite_mode() -> str:
-    """key: per-frame green key with tracking (composite_hero). locked: fill the measured panel shape, held still (composite_hero_locked)."""
-    return _env("HERO_COMPOSITE_MODE", "key").lower()
+    """fixed (default): measure the panel once per run, record it, paint the hero there on every frame of every chunk (composite_hero_fixed).
+    key: per-frame green key with tracking (composite_hero). locked: fill the measured panel shape, held still when the camera is (composite_hero_locked)."""
+    return _env("HERO_COMPOSITE_MODE", "fixed").lower()
 
 
 def _quad_distance(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> float:
@@ -640,9 +642,146 @@ def composite_hero_locked(clip: Path, hero: Path, anchor: Path, target: Path, bl
     return {"mode": "locked" if locked else "tracked", "frames": frames, "lost_frames": sum(1 for q in measured if q is None), "max_deviation_px": deviation, "typical_deviation_px": typical, "bleed_px": bleed_px, "hero": hero.name}
 
 
-def composite_hero_by_mode(clip: Path, hero: Path, anchor: Path, target: Path) -> tuple[dict[str, Any], str]:
+# ----------------------------------------------------------------------------- fixed placement
+
+
+PLACEMENT_FILE = "hero-placement.json"
+
+
+def placement_path(run_dir: Path) -> Path:
+    return run_dir / PLACEMENT_FILE
+
+
+def _first_frame(clip: Path, width: int, height: int) -> Optional[Image.Image]:
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(clip), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    ).stdout
+    if len(raw) < width * height * 3:
+        return None
+    return Image.frombytes("RGB", (width, height), raw[: width * height * 3])
+
+
+def measure_placement(clip: Path, anchor: Path) -> dict[str, Any]:
+    """Where the panel is, measured once: the green quad on the clip's first frame, else the anchor's panel box.
+
+    The first frame of the first chunk is the anchor as the video model drew it, so its corners are the
+    truest placement. If no plausible quad is found there, the anchor's axis-aligned panel box scaled to
+    the clip size is used instead.
+    """
+    panel = detect_panel(anchor)
+    if panel is None:
+        raise RuntimeError(f"no green panel found in {anchor.name}")
+    dims = video_dimensions(clip)
+    if dims is None:
+        raise RuntimeError(f"cannot read dimensions of {clip.name}")
+    width, height = dims
+    with Image.open(anchor) as image:
+        anchor_w, anchor_h = image.size
+    sx, sy = width / anchor_w, height / anchor_h
+    bx, by, bw, bh = panel[0] * sx, panel[1] * sy, panel[2] * sx, panel[3] * sy
+    aspect = bw / bh
+    window = (int(bx - bw * 0.3), int(by - bh * 0.3), int(bw * 1.6), int(bh * 1.6))
+    quad: Optional[tuple[tuple[float, float], ...]] = None
+    source = "anchor-box"
+    frame = _first_frame(clip, width, height)
+    if frame is not None:
+        corners = _corners_from_mask(_green_mask(frame), window)
+        if corners is not None:
+            corners = _extrapolate_clipped(corners, width, height, aspect)
+            if _plausible(corners, None, aspect, width, height):
+                quad = corners
+                source = "first-frame"
+    if quad is None:
+        quad = ((bx, by), (bx + bw, by), (bx, by + bh), (bx + bw, by + bh))
+    return {"width": width, "height": height, "source": source, "clip": clip.name, "quad": [[round(x, 2), round(y, 2)] for x, y in quad]}
+
+
+def hero_placement(run_dir: Path, clip: Path, anchor: Path) -> tuple[dict[str, Any], bool]:
+    """The run's recorded placement, measured from this clip and saved on first use. Returns (placement, reused)."""
+    path = placement_path(run_dir)
+    dims = video_dimensions(clip)
+    if path.is_file():
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict) and len(saved.get("quad") or []) == 4 and (dims is None or (saved.get("width"), saved.get("height")) == dims):
+                return saved, True
+        except json.JSONDecodeError:
+            pass
+    placement = measure_placement(clip, anchor)
+    path.write_text(json.dumps(placement, indent=2) + "\n", encoding="utf-8")
+    return placement, False
+
+
+def composite_hero_fixed(clip: Path, hero: Path, target: Path, placement: dict[str, Any], bleed_px: Optional[float] = None) -> dict[str, Any]:
+    """Paint the hero on the recorded panel quad on every frame. One pass, no per-frame measurement, no movement.
+
+    A copy beside composite_hero and composite_hero_locked. The hero fills the whole quad shape (no green
+    key), grown by `bleed_px` (HERO_COMPOSITE_BLEED_PX) so no green peeks out at the edges; anything the model
+    draws in front of the panel is painted over. The warped hero and its mask are built once and pasted
+    onto every frame, so the composite is identical frame to frame and chunk to chunk.
+    """
+    bleed_px = hero_bleed_px() if bleed_px is None else bleed_px
+    dims = video_dimensions(clip)
+    if dims is None:
+        raise RuntimeError(f"cannot read dimensions of {clip.name}")
+    width, height = dims
+    if (placement.get("width"), placement.get("height")) != (width, height):
+        raise RuntimeError(f"recorded placement is for {placement.get('width')}x{placement.get('height')}, clip {clip.name} is {width}x{height}")
+    fps_out = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(clip)], text=True).strip()
+    quad = _grow_quad(tuple((float(x), float(y)) for x, y in placement["quad"]), bleed_px)
+    rx0 = max(0, int(min(p[0] for p in quad)))
+    ry0 = max(0, int(min(p[1] for p in quad)))
+    rx1 = min(width, int(max(p[0] for p in quad)) + 1)
+    ry1 = min(height, int(max(p[1] for p in quad)) + 1)
+    if rx1 - rx0 < 8 or ry1 - ry0 < 8:
+        raise RuntimeError(f"recorded placement is too small to paint ({rx1 - rx0}x{ry1 - ry0})")
+    local = [(p[0] - rx0, p[1] - ry0) for p in quad]
+    region_size = (rx1 - rx0, ry1 - ry0)
+    with Image.open(hero) as hero_image:
+        hero_rgb = hero_image.convert("RGB")
+        hero_rgb.load()
+    warped = hero_rgb.transform(region_size, Image.PERSPECTIVE, _perspective_coeffs(local, hero_rgb.size), Image.BICUBIC)
+    shape = Image.new("L", region_size, 0)
+    ImageDraw.Draw(shape).polygon([local[0], local[1], local[3], local[2]], fill=255)
+    shape = shape.filter(ImageFilter.GaussianBlur(0.6))
+
+    frame_bytes = width * height * 3
+    decoder = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(clip), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+    encoder = subprocess.Popen(
+        ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}", "-r", fps_out, "-i", "-", "-i", str(clip),
+         "-map", "0:v", "-map", "1:a?", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", "-movflags", "+faststart", str(target)],
+        stdin=subprocess.PIPE,
+    )
+    frames = 0
+    try:
+        while True:
+            raw = decoder.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                break
+            frame = Image.frombytes("RGB", (width, height), raw)
+            frame.paste(warped, (rx0, ry0), shape)
+            encoder.stdin.write(frame.tobytes())
+            frames += 1
+    finally:
+        decoder.stdout.close()
+        encoder.stdin.close()
+        decoder.wait()
+        encoder.wait()
+    if encoder.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed to encode {target.name}")
+    return {"mode": "fixed", "frames": frames, "source": placement.get("source"), "quad": placement["quad"], "bleed_px": bleed_px, "hero": hero.name}
+
+
+def composite_hero_by_mode(clip: Path, hero: Path, anchor: Path, target: Path, run_dir: Optional[Path] = None) -> tuple[dict[str, Any], str]:
     """Run whichever compositor HERO_COMPOSITE_MODE names and return (info, a one-line description for the log)."""
-    if hero_composite_mode() == "locked":
+    mode = hero_composite_mode()
+    if mode == "fixed":
+        placement, reused = hero_placement(run_dir or clip.parents[1], clip, anchor)
+        info = composite_hero_fixed(clip, hero, target, placement)
+        origin = f"reused from {PLACEMENT_FILE}" if reused else f"measured from the {placement['source']} and saved to {PLACEMENT_FILE}"
+        return info, f"fixed fill over {info['frames']} frames at {placement['quad']} ({origin})"
+    if mode == "locked":
         info = composite_hero_locked(clip, hero, anchor, target)
         return info, f"{info['mode']} fill over {info['frames']} frames (panel deviation typical {info['typical_deviation_px']:.0f}px, max {info['max_deviation_px']:.0f}px, {info['lost_frames']} frames without a measurable panel)"
     info = composite_hero(clip, hero, anchor, target)
@@ -791,7 +930,7 @@ def render_chunks(
 
     A chunk whose render was queued before (prompt_id in the manifest) is first looked up in ComfyUI;
     a finished render is downloaded instead of rendered again. A chunk folder holding a hero image
-    gets chunks/NN/composited.mp4 (hero keyed into the anchor's green panel), which is what gets appended.
+    gets chunks/NN/composited.mp4 (hero placed on the anchor's green panel), which is what gets appended.
     """
 
     def composite(chunk: dict[str, Any], clip: Path) -> None:
@@ -803,7 +942,7 @@ def render_chunks(
         if composited.is_file() and chunk.get("composited") and chunk.get("hero") == hero.name:
             log("video", f"chunk {chunk['index']}: composite exists, reusing")
             return
-        info, described = composite_hero_by_mode(clip, hero, anchor, composited)
+        info, described = composite_hero_by_mode(clip, hero, anchor, composited, run_dir)
         chunk["hero"] = hero.name
         chunk["composited"] = str(composited.relative_to(run_dir).as_posix())
         save_manifest(run_dir, manifest)
@@ -865,7 +1004,7 @@ def render_chunks_continuous(
 
     A chunk whose render was queued before (prompt_id in the manifest) is first looked up in ComfyUI;
     a finished render is downloaded instead of rendered again. A chunk folder holding a hero image
-    gets chunks/NN/composited.mp4 (hero keyed into the anchor's green panel), which is what gets appended.
+    gets chunks/NN/composited.mp4 (hero placed on the anchor's green panel), which is what gets appended.
     """
 
     def composite(chunk: dict[str, Any], clip: Path) -> None:
@@ -877,7 +1016,7 @@ def render_chunks_continuous(
         if composited.is_file() and chunk.get("composited") and chunk.get("hero") == hero.name:
             log("video", f"chunk {chunk['index']}: composite exists, reusing")
             return
-        info, described = composite_hero_by_mode(clip, hero, anchor, composited)
+        info, described = composite_hero_by_mode(clip, hero, anchor, composited, run_dir)
         chunk["hero"] = hero.name
         chunk["composited"] = str(composited.relative_to(run_dir).as_posix())
         save_manifest(run_dir, manifest)

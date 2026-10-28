@@ -19,7 +19,7 @@ queue with retry and cancel, tenants and keys, the admin UI, migrations, logging
 | Axis | Today | Planned additions |
 |---|---|---|
 | Script source | news search; provided script (API `script_text`, skips search and script stages) | provided script in the UI; a site or product page as the source; a bullet list the LLM expands |
-| Audio source | Chatterbox narration of the script | a provided track (song, voice-over), skipping the audio stage |
+| Audio source | TTS narration of the script | a provided track (song, voice-over), skipping the audio stage |
 | Layout | none; green-panel key with per-segment heroes | side-by-side composite on a plain backdrop; layout as a profile field |
 
 ## Promotional videos from a site

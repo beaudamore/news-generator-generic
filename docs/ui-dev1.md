@@ -6,7 +6,7 @@ Status: plan agreed 2026-09-14. Implemented and merged to main (PR #1, 2026-09-1
 
 - Database: SQLite now, through SQLModel, one file under a configurable data directory. Postgres later by changing the connection URL only.
 - Front end: React with TypeScript and Vite, built bundle served by FastAPI under `/admin`. One deployable process. The JSON API is the product surface; the UI is a client of it.
-- Tenancy split: `.env` is system control. It holds service endpoints (ComfyUI video and avatar, Chatterbox, LLM, reranker, SearXNG), storage paths, output size, and the admin tenant's bootstrap API key. Everything tenant-specific lives in the database. Tenants never see or set service URLs.
+- Tenancy split: `.env` is system control. It holds service endpoints (ComfyUI video and avatar, TTS, LLM, reranker, SearXNG), storage paths, output size, and the admin tenant's bootstrap API key. Everything tenant-specific lives in the database. Tenants never see or set service URLs.
 - The current single-tenant `.env` flow keeps working unchanged. On first start the app creates the admin tenant from `.env`, so nothing that works today breaks.
 
 ## What exists today
@@ -24,7 +24,7 @@ Tables, all with `tenant_id` except `tenants`:
 | tenants | slug, display name, created_at, active flag |
 | api_keys | hashed key, tenant_id, label, created_at, revoked_at |
 | avatars | name, image path, prompt, negative prompt, seed, width, height, workflow used, source (generated or uploaded) |
-| voices | name as shown to the tenant, Chatterbox library name (prefixed), sample path, language |
+| voices | name as shown to the tenant, TTS library name (prefixed), sample path, language |
 | prompts | kind (summarize, video visual, video sound), name, body, is_default, updated_at |
 | search_profiles | name, search text, categories, language, safesearch, max articles, max age days, rank query, rank candidates, voice, avatar, intended seconds, wpm |
 | schedules | profile_id, cron expression, enabled, last_run_at, next_run_at |
@@ -34,7 +34,7 @@ Rules:
 
 - Tenant resolution: API key in the `Authorization` header maps to a tenant. A `client_id` slug is fine as a display and URL element, but access is keyed on the secret, not the slug.
 - Per-tenant storage: `assets/<tenant>/avatars/` and `output/<tenant>/<run_id>/`. Artifact routes check tenant ownership.
-- Voices: Chatterbox has one flat library with no tenancy. Library names are prefixed `<tenant>-<voice>`; the app strips the prefix in listings. Upload and delete already exist in `scripts/generate_audio.py` and only need routes.
+- Voices: the TTS server has one flat library with no tenancy. Library names are prefixed `<tenant>-<voice>`; the app strips the prefix in listings. Upload and delete already exist in `scripts/generate_audio.py` and only need routes.
 - Prompts: the markdown files under `prompts/` become seed rows and remain the defaults for new tenants. A tenant edits its own copy. The user-message prose currently inside `services/prompting.py` moves into the same table, so no prompt text remains in code.
 - Search profiles replace the dozen form fields on `/generate`; requests pass `profile_id` and optional overrides.
 
@@ -61,7 +61,7 @@ Status values: `queued`, `preflight`, `running`, `done`, `failed`, `cancelled`. 
 ### Behavior
 
 - Enqueue: `/generate` and the scheduler insert a row and return `run_id` immediately. `GET /runs/{id}` returns status, stage, and artifact links. A `wait=true` flag keeps the current blocking behavior for scripts.
-- Worker: one loop in the app process, oldest queued first, ordered by priority then queue time. Concurrency is per resource, not per tenant: ComfyUI slot of 1, Chatterbox slot of 1, LLM and search may overlap. In practice the worker runs search, script, and audio for run N+1 while run N is in ComfyUI.
+- Worker: one loop in the app process, oldest queued first, ordered by priority then queue time. Concurrency is per resource, not per tenant: ComfyUI slot of 1, TTS slot of 1, LLM and search may overlap. In practice the worker runs search, script, and audio for run N+1 while run N is in ComfyUI.
 - Failure: a failed stage marks the run failed with stage and message, which `PipelineError` already carries. No automatic retries on the video stage.
 - Retry: explicit, `POST /runs/{id}/retry`, re-queues from the failed stage using artifacts already on disk.
 - Cancel: `POST /runs/{id}/cancel` flips a queued run to cancelled; for a running video stage it calls ComfyUI's interrupt endpoint and the wait loop marks the run cancelled.
@@ -78,12 +78,12 @@ Run once per dequeued job before any stage starts. Each check is a fast HTTP cal
 | SearXNG | `GET /config` returns 200 | JSON format enabled; at least one engine in the configured categories |
 | LLM | `GET /v1/models` returns 200 | configured `OPENAI_MODEL` is in the list |
 | Reranker | `GET /v1/models` or `/health` | configured rerank model present; skipped when rerank disabled |
-| Chatterbox | `GET /health` reports `model_loaded: true` | the profile's voice exists in `GET /voices` |
+| TTS server | `GET /v1/models` lists `TTS_OPENAI_MODEL` | the profile's voice exists in `GET /v1/audio/voices` |
 | ComfyUI video | `GET /system_stats` returns 200 | queue depth from `GET /queue`; template passes `validate_video_workflow`; anchor image exists |
 | ComfyUI avatar | same, only for runs that generate an avatar | |
 | Local | ffmpeg and ffprobe on PATH; run directory writable; free disk above threshold | |
 
-- Any hard failure marks the run `failed` at stage `preflight` without touching the pipeline. The message names the service and the problem, for example `chatterbox: voice 'james-son-of-alphaus' not in library`.
+- Any hard failure marks the run `failed` at stage `preflight` without touching the pipeline. The message names the service and the problem, for example `tts_openai: voice 'james-son-of-alphaus' not in library`.
 - Reranker down is soft: the pipeline already degrades to lexical ranking, so preflight logs a warning and continues. Everything else is hard.
 - `GET /health/deep` runs the same checks with no run attached, for the UI status panel and the scheduler.
 - Results are cached for thirty seconds so a burst of scheduled runs does not hammer the hosts.
@@ -121,8 +121,8 @@ Conventions:
 |---|---|---|
 | `list_voices` | `limit?, cursor?` | items of `{ name, language, sample_url, created_at }` |
 | `get_voice` | `name` | `{ name, language, sample_url, library_name, created_at }` |
-| `upload_voice` | `name, sample (file), language = "en", replace = false` | the voice. `conflict` if it exists and `replace` is false. Uploads to Chatterbox as `<tenant>-<name>`. |
-| `delete_voice` | `name` | `{ deleted: name }`. Removes from Chatterbox and the database. |
+| `upload_voice` | `name, sample (file), language = "en", replace = false` | the voice. `conflict` if it exists and `replace` is false. Uploads to the TTS library as `<tenant>-<name>`. |
+| `delete_voice` | `name` | `{ deleted: name }`. Removes from the TTS library and the database. |
 
 ### Avatars
 
@@ -215,7 +215,7 @@ Every billable resource is recorded per tenant, per run, per stage, in a `usage_
 |---|---|---|
 | LLM tokens | prompt tokens, completion tokens | the `usage` block in the OpenAI-compatible response; model name in `meta` |
 | Reranker calls | documents scored | count of documents per rerank request |
-| Chatterbox | seconds of audio generated, wall-clock seconds | narration duration and request timing |
+| TTS | seconds of audio generated, wall-clock seconds | narration duration and request timing |
 | ComfyUI video | wall-clock seconds of GPU time, output seconds, pixels | queue-to-download timing, video duration, width x height |
 | ComfyUI avatar | wall-clock seconds, images | same |
 | SearXNG | requests | count |
