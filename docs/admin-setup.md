@@ -12,7 +12,7 @@ The app itself is CPU-only and portable. All heavy work happens on external HTTP
 | TTS server (OpenAI-compatible, Qwen3-TTS) | `TTS_OPENAI_BASE_URL`, `TTS_OPENAI_MODEL` | narration audio and the voice library |
 | ComfyUI (video) | `VIDEO_COMFYUI_BASE_URL`, `VIDEO_COMFYUI_WORKFLOW` | LTX-2.3 talking-head video; the workflow must be the official IA2V template, see README "Video Workflow" |
 | ComfyUI (avatar, optional) | `AVATAR_COMFYUI_BASE_URL` | Z-Image-Turbo avatar generation |
-| ComfyUI helper node (optional) | `COMFYUI_AUTO_DOWNLOAD_MODELS`, `COMFYUI_HF_TOKEN` | lets the app download missing model files onto each ComfyUI host; install `comfyui-helper-node/news_generator_helper` into that host's `custom_nodes/`, see README "ComfyUI Model Downloads" |
+| ComfyUI helper node (optional) | `COMFYUI_AUTO_DOWNLOAD_MODELS`, `COMFYUI_HF_TOKEN`, `COMFYUI_HELPER_TOKEN` | lets the app download missing model files onto each ComfyUI host; install `comfyui-helper-node/news_generator_helper` into that host's `custom_nodes/`, see README "ComfyUI Model Downloads" |
 
 ## Phase 0 — Python environment
 
@@ -204,7 +204,7 @@ This is the slow gate (minutes on a capable GPU). Before running it, check the h
 
 ```bash
 .venv/bin/python scripts/ensure_comfyui_models.py                     # audit: present / MISSING per file, missing node packs
-.venv/bin/python scripts/ensure_comfyui_models.py --download --wait   # needs comfyui-helper-node installed on the host
+.venv/bin/python scripts/ensure_comfyui_models.py --download --wait   # via comfyui-helper-node on the host (or ComfyUI-Manager as a fallback)
 ```
 
 Before blaming the app for anything else, run the workflow JSON manually in the ComfyUI UI — see the ComfyUI Validation Checklist in the README.

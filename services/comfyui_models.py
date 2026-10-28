@@ -25,6 +25,7 @@ Environment:
     COMFYUI_AUTO_DOWNLOAD_MODELS     true: preflight starts downloads for missing models
     COMFYUI_HF_TOKEN                 Hugging Face token passed with each download request
     COMFYUI_CIVITAI_TOKEN            Civitai token passed with each download request
+    COMFYUI_HELPER_TOKEN             sent as X-Helper-Token when the helper node requires one
 """
 
 from __future__ import annotations
@@ -267,17 +268,22 @@ def audit(base_url: str, workflow_path: Path, manifest: Optional[dict[str, dict[
     by_file: dict[str, dict[str, Any]] = {}
     missing_classes: list[str] = []
     folder_lists: dict[str, Optional[list[str]]] = {}
+    infos: dict[str, Optional[dict[str, Any]]] = {}  # one /object_info call per class per audit
     for ref in workflow_model_refs(workflow):
         entry = manifest_entry(ref["filename"], manifest) or {}
         folder = entry.get("folder") or default_folder(ref["class_type"], ref["input"])
-        info = object_info(base, ref["class_type"], use_cache=use_cache)
+        if ref["class_type"] not in infos:
+            infos[ref["class_type"]] = object_info(base, ref["class_type"], use_cache=use_cache)
+        info = infos[ref["class_type"]]
         class_missing = info is None
         if class_missing and ref["class_type"] not in missing_classes:
             missing_classes.append(ref["class_type"])
         installed: Optional[bool] = None
         options = None if info is None else _input_options(info, ref["input"])
         if options is not None:
-            installed = ref["filename"] in options or Path(ref["filename"]).name in {Path(o).name for o in options}
+            # Exact match: ComfyUI's choices are paths relative to the models folder, and the
+            # template value must be one of them as written (sub/x.safetensors != x.safetensors).
+            installed = ref["filename"] in options
         elif folder:
             # The node is missing or the input is not a combo: fall back to the folder listing.
             if folder not in folder_lists:
@@ -287,7 +293,7 @@ def audit(base_url: str, workflow_path: Path, manifest: Optional[dict[str, dict[
                     folder_lists[folder] = None
             files = folder_lists[folder]
             if files is not None:
-                installed = ref["filename"] in files or Path(ref["filename"]).name in {Path(f).name for f in files}
+                installed = ref["filename"] in files
         record = by_file.setdefault(ref["filename"], {
             "filename": ref["filename"],
             "folder": folder,
@@ -362,7 +368,8 @@ def helper_download(base_url: str, model: dict[str, Any]) -> dict[str, Any]:
     token = _token_for(model["url"])
     if token:
         body["token"] = token
-    response = _requests().post(f"{base_url.rstrip('/')}/news-generator/models/download", json=body, timeout=max(_timeout(), 30))
+    headers = {"X-Helper-Token": _env("COMFYUI_HELPER_TOKEN")} if _env("COMFYUI_HELPER_TOKEN") else {}
+    response = _requests().post(f"{base_url.rstrip('/')}/news-generator/models/download", json=body, headers=headers, timeout=max(_timeout(), 10))
     if not response.ok:
         detail = response.text[:300]
         try:
@@ -405,10 +412,10 @@ def manager_download(base_url: str, model: dict[str, Any]) -> dict[str, Any]:
         "url": model["url"],
     }
     requests = _requests()
-    response = requests.post(f"{base}/v2/manager/queue/install_model", json=payload, timeout=max(_timeout(), 30))
+    response = requests.post(f"{base}/v2/manager/queue/install_model", json=payload, timeout=max(_timeout(), 10))
     if not response.ok:
         raise ApiError("service_unavailable", f"ComfyUI-Manager refused download of {model['filename']}: {response.status_code} {response.text[:300]}")
-    requests.get(f"{base}/v2/manager/queue/start", timeout=max(_timeout(), 30))
+    requests.get(f"{base}/v2/manager/queue/start", timeout=max(_timeout(), 10))
     return {"status": "queued", "via": "manager", "filename": model["filename"], "url": model["url"]}
 
 
@@ -427,13 +434,14 @@ def downloader_for(base_url: str) -> Optional[str]:
 # ----------------------------------------------------------------------------- ensure
 
 
-def ensure(base_url: str, workflow_path: Path, download: bool = True, manifest: Optional[dict[str, dict[str, Any]]] = None) -> dict[str, Any]:
+def ensure(base_url: str, workflow_path: Path, download: bool = True, manifest: Optional[dict[str, dict[str, Any]]] = None, audited: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Audit the template against the host and, when asked, start downloads for every missing manifest model.
 
     Adds to the audit result: "downloader" (helper, manager, or null), "started": [job records],
     "errors": [{"filename", "message"}]. Downloads are asynchronous on the host; poll `jobs()`.
+    `audited` reuses an audit result taken moments ago instead of querying the host again.
     """
-    result = audit(base_url, workflow_path, manifest=manifest, use_cache=False)
+    result = dict(audited) if audited is not None else audit(base_url, workflow_path, manifest=manifest, use_cache=False)
     result["downloader"] = None
     result["started"] = []
     result["errors"] = []
@@ -569,7 +577,7 @@ def preflight_detail(base_url: str, workflow_path: Path) -> tuple[str, str]:
     if result["missing"]:
         parts.append(f"missing model files: {result['missing']}")
     if result["missing"] and _flag("COMFYUI_AUTO_DOWNLOAD_MODELS"):
-        ensured = ensure(base_url, workflow_path, download=True)
+        ensured = ensure(base_url, workflow_path, download=True, audited=result)
         if ensured["started"]:
             names = [j.get("filename") for j in ensured["started"]]
             parts.append(f"download started via {ensured['downloader']} for {names}; retry once they finish")

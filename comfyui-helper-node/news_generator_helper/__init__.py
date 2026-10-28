@@ -20,11 +20,24 @@ A job is {"id", "status", "url", "folder", "filename", "path", "bytes_done", "by
 queued, downloading, verifying, done, exists, failed, cancelled.
 
 Downloads run one at a time in a background thread, write to "<filename>.part" and rename on
-success, resume a partial file with a Range request, and verify sha256 when one is given.
-Only URLs whose host is in NEWS_GENERATOR_DOWNLOAD_ALLOWED_HOSTS (comma-separated; default
-huggingface.co, hf.co, civitai.com) are accepted; redirects (to the HF CDN, for example) are
-followed. A Hugging Face token comes from the request body, else HF_TOKEN / HUGGINGFACE_TOKEN
-in the ComfyUI process environment; a Civitai token from the body, else CIVITAI_API_TOKEN.
+success, resume a partial file with a Range request (only when the .part came from the same
+URL), and verify sha256 when one is given.
+
+Safety, because ComfyUI's HTTP port has no authentication of its own:
+- Only model folders are writable (MODEL_FOLDERS below): never custom_nodes, configs, or
+  anything that ComfyUI executes. Only model file extensions are accepted (MODEL_EXTENSIONS).
+- An existing file is never overwritten.
+- Only https URLs whose host is in NEWS_GENERATOR_DOWNLOAD_ALLOWED_HOSTS (comma-separated;
+  default huggingface.co, hf.co, civitai.com) are accepted. Redirects are followed only to
+  https, and the Authorization header is dropped when a redirect leaves the original host.
+- NEWS_GENERATOR_HELPER_TOKEN, when set on the ComfyUI host, must be sent as the
+  X-Helper-Token header (or ?token=) on the download and cancel routes. Set it on any host
+  reachable by more than the app.
+- Limits: NEWS_GENERATOR_DOWNLOAD_MAX_GB per file (default 80), NEWS_GENERATOR_DOWNLOAD_MIN_FREE_GB
+  kept free on the target disk (default 5), at most MAX_QUEUED jobs waiting.
+
+A Hugging Face token comes from the request body, else HF_TOKEN / HUGGINGFACE_TOKEN in the
+ComfyUI process environment; a Civitai token from the body, else CIVITAI_API_TOKEN.
 
 Install: copy or symlink this folder into ComfyUI/custom_nodes/ and restart ComfyUI. It
 needs nothing beyond the standard library and what ComfyUI already ships.
@@ -33,8 +46,10 @@ needs nothing beyond the standard library and what ComfyUI already ships.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import re
+import shutil
 import threading
 import time
 import urllib.error
@@ -45,10 +60,19 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
-HELPER_VERSION = "0.1.0"
+HELPER_VERSION = "0.2.0"
 DEFAULT_ALLOWED_HOSTS = ("huggingface.co", "hf.co", "civitai.com")
 CHUNK_BYTES = 8 * 1024 * 1024
 MAX_JOBS_KEPT = 200
+MAX_QUEUED = 32
+# Folders this helper may write into. Everything else in folder_paths (custom_nodes, configs, ...)
+# is refused, whatever ComfyUI knows about it.
+MODEL_FOLDERS = frozenset({
+    "checkpoints", "diffusion_models", "unet", "text_encoders", "clip", "vae", "vae_approx", "loras",
+    "latent_upscale_models", "upscale_models", "audio_encoders", "controlnet", "clip_vision",
+    "style_models", "embeddings", "gligen", "hypernetworks", "photomaker", "model_patches", "diffusers",
+})
+MODEL_EXTENSIONS = (".safetensors", ".sft", ".gguf", ".ckpt", ".pt", ".pth", ".bin", ".onnx")
 
 NODE_CLASS_MAPPINGS: dict[str, Any] = {}
 NODE_DISPLAY_NAME_MAPPINGS: dict[str, str] = {}
@@ -77,6 +101,36 @@ def _default_token(url: str) -> Optional[str]:
     if host.endswith("civitai.com"):
         return os.environ.get("CIVITAI_API_TOKEN") or None
     return None
+
+
+def _max_bytes() -> int:
+    return int(float(os.environ.get("NEWS_GENERATOR_DOWNLOAD_MAX_GB", "80") or 80) * 1024**3)
+
+
+def _min_free_bytes() -> int:
+    return int(float(os.environ.get("NEWS_GENERATOR_DOWNLOAD_MIN_FREE_GB", "5") or 5) * 1024**3)
+
+
+def _helper_token() -> str:
+    return os.environ.get("NEWS_GENERATOR_HELPER_TOKEN", "").strip()
+
+
+class _SafeRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to https, and never carry Authorization to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - urllib hook
+        new = urllib.parse.urlparse(newurl)
+        if new.scheme != "https":
+            raise urllib.error.HTTPError(newurl, code, f"refusing redirect to non-https URL {newurl}", headers, fp)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        if (new.hostname or "").lower() != (urllib.parse.urlparse(req.full_url).hostname or "").lower():
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+_OPENER = urllib.request.build_opener(_SafeRedirects())
 
 
 class DownloadJob:
@@ -145,12 +199,14 @@ class Downloader:
 
     def submit(self, job: DownloadJob) -> DownloadJob:
         with self.lock:
+            if len(self.queue) >= MAX_QUEUED:
+                raise RuntimeError(f"download queue full ({MAX_QUEUED} waiting); try again later")
             self.jobs[job.id] = job
-            while len(self.jobs) > MAX_JOBS_KEPT:
-                oldest_id, oldest = next(iter(self.jobs.items()))
-                if oldest.status in ("queued", "downloading", "verifying"):
-                    break
-                self.jobs.pop(oldest_id)
+            if len(self.jobs) > MAX_JOBS_KEPT:  # evict the oldest finished jobs, keep active ones
+                for old_id in [i for i, j in self.jobs.items() if j.status not in ("queued", "downloading", "verifying")]:
+                    if len(self.jobs) <= MAX_JOBS_KEPT:
+                        break
+                    self.jobs.pop(old_id)
             self.queue.append(job)
             self._ensure_thread()
         self.wake.set()
@@ -173,6 +229,9 @@ class Downloader:
         while True:
             with self.lock:
                 job = self.queue.pop(0) if self.queue else None
+                if job is not None:  # claim it under the lock so a concurrent cancel cannot be lost
+                    job.status = "downloading"
+                    job.started_at = time.time()
             if job is None:
                 self.wake.wait(timeout=5)
                 self.wake.clear()
@@ -190,11 +249,18 @@ class Downloader:
                     job.finished_at = time.time()
 
     def _download(self, job: DownloadJob) -> None:
-        job.status = "downloading"
-        job.started_at = time.time()
+        if job.cancel_requested:
+            raise _Cancelled()
         job.path.parent.mkdir(parents=True, exist_ok=True)
         part = job.path.with_name(job.path.name + ".part")
-        resume_from = part.stat().st_size if part.exists() else 0
+        origin = part.with_name(part.name + ".url")  # which URL the .part came from; resume only from the same one
+        resume_from = 0
+        if part.exists():
+            if origin.exists() and origin.read_text(encoding="utf-8").strip() == job.url:
+                resume_from = part.stat().st_size
+            else:
+                part.unlink()
+        origin.write_text(job.url, encoding="utf-8")
 
         headers = {"User-Agent": f"news-generator-helper/{HELPER_VERSION}"}
         if job.token:
@@ -203,7 +269,7 @@ class Downloader:
             headers["Range"] = f"bytes={resume_from}-"
         request = urllib.request.Request(job.url, headers=headers)
         try:
-            response = urllib.request.urlopen(request, timeout=60)  # noqa: S310 - host checked at submit
+            response = _OPENER.open(request, timeout=60)  # noqa: S310 - host checked at submit, redirects filtered
         except urllib.error.HTTPError as exc:
             if exc.code == 416 and resume_from:  # the .part is already complete
                 response = None
@@ -224,6 +290,11 @@ class Downloader:
                 length = response.headers.get("Content-Length")
                 if length and length.isdigit():
                     job.bytes_total = int(length) + (resume_from if status == 206 else 0)
+                    if job.bytes_total > _max_bytes():
+                        raise RuntimeError(f"file is {job.bytes_total} bytes, over NEWS_GENERATOR_DOWNLOAD_MAX_GB")
+                    free = shutil.disk_usage(job.path.parent).free
+                    if free - (job.bytes_total - resume_from) < _min_free_bytes():
+                        raise RuntimeError(f"not enough disk: {free // 1024**3} GB free, need {job.bytes_total // 1024**3} GB plus NEWS_GENERATOR_DOWNLOAD_MIN_FREE_GB")
                 window_start, window_bytes = time.time(), 0
                 with part.open(mode) as out:
                     while True:
@@ -234,6 +305,8 @@ class Downloader:
                             break
                         out.write(chunk)
                         job.bytes_done += len(chunk)
+                        if job.bytes_done > _max_bytes():
+                            raise RuntimeError("download exceeded NEWS_GENERATOR_DOWNLOAD_MAX_GB")
                         window_bytes += len(chunk)
                         elapsed = time.time() - window_start
                         if elapsed >= 1.0:
@@ -259,6 +332,7 @@ class Downloader:
                 raise RuntimeError(f"sha256 mismatch: got {digest.hexdigest()}, expected {job.sha256}")
 
         os.replace(part, job.path)
+        origin.unlink(missing_ok=True)
         job.bytes_total = job.path.stat().st_size
         job.bytes_done = job.bytes_total
         job.status = "done"
@@ -288,13 +362,20 @@ def resolve_target(folder: str, filename: str, subfolder: str = "") -> Path:
     """The absolute path a model would be written to, inside the first configured path of that folder."""
     if folder_paths is None:
         raise RuntimeError("folder_paths unavailable outside ComfyUI")
+    if folder not in MODEL_FOLDERS:
+        raise ValueError(f"folder {folder!r} is not a model folder; allowed: {sorted(MODEL_FOLDERS)}")
     if not _FILENAME_RE.fullmatch(filename or "") or filename in (".", ".."):
         raise ValueError("filename must be a plain file name (no path separators)")
+    if not filename.lower().endswith(MODEL_EXTENSIONS):
+        raise ValueError(f"filename must end with one of {MODEL_EXTENSIONS}")
     if subfolder and not _SUBFOLDER_RE.fullmatch(subfolder):
         raise ValueError("subfolder must be a relative path without '..'")
-    paths = folder_paths.get_folder_paths(folder)
+    try:
+        paths = folder_paths.get_folder_paths(folder)  # maps legacy names (unet -> diffusion_models)
+    except KeyError:
+        paths = []
     if not paths:
-        raise ValueError(f"unknown models folder {folder!r}; known: {sorted(folder_paths.folder_names_and_paths)}")
+        raise ValueError(f"models folder {folder!r} is not configured on this host")
     root = Path(paths[0]).resolve()
     target = (root / subfolder / filename).resolve() if subfolder else (root / filename).resolve()
     if root not in target.parents:
@@ -306,6 +387,15 @@ def _json_error(status: int, message: str):
     return web.json_response({"error": message}, status=status)
 
 
+def _authorized(request) -> bool:
+    """True when no NEWS_GENERATOR_HELPER_TOKEN is set, or the request carries it."""
+    expected = _helper_token()
+    if not expected:
+        return True
+    given = request.headers.get("X-Helper-Token") or request.query.get("token") or ""
+    return hmac.compare_digest(given, expected)
+
+
 if PromptServer is not None:
     routes = PromptServer.instance.routes
 
@@ -314,8 +404,10 @@ if PromptServer is not None:
         return web.json_response({
             "name": "news-generator-helper",
             "version": HELPER_VERSION,
-            "folders": sorted(folder_paths.folder_names_and_paths),
+            "folders": sorted(f for f in MODEL_FOLDERS if f in folder_paths.folder_names_and_paths or f == "unet"),
             "allowed_hosts": list(_allowed_hosts()),
+            "requires_token": bool(_helper_token()),
+            "max_gb": _max_bytes() / 1024**3,
             "has_hf_token": bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")),
             "has_civitai_token": bool(os.environ.get("CIVITAI_API_TOKEN")),
         })
@@ -323,12 +415,20 @@ if PromptServer is not None:
     @routes.get("/news-generator/models/files/{folder}")
     async def list_folder(request):
         folder = request.match_info["folder"]
-        if folder not in folder_paths.folder_names_and_paths:
-            return _json_error(404, f"unknown models folder {folder!r}")
-        return web.json_response({"folder": folder, "files": folder_paths.get_filename_list(folder), "paths": folder_paths.get_folder_paths(folder)})
+        if folder not in MODEL_FOLDERS:
+            return _json_error(404, f"{folder!r} is not a model folder")
+        try:
+            paths = folder_paths.get_folder_paths(folder)
+        except KeyError:
+            paths = []
+        if not paths:
+            return _json_error(404, f"models folder {folder!r} is not configured on this host")
+        return web.json_response({"folder": folder, "files": folder_paths.get_filename_list(folder), "paths": paths})
 
     @routes.post("/news-generator/models/download")
     async def start_download(request):
+        if not _authorized(request):
+            return _json_error(401, "X-Helper-Token missing or wrong")
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
@@ -352,7 +452,7 @@ if PromptServer is not None:
         except ValueError as exc:
             return _json_error(400, str(exc))
 
-        if target.exists() and not body.get("overwrite"):
+        if target.exists():
             job = DownloadJob(url, folder, filename, target, sha256, None)
             job.status = "exists"
             job.bytes_total = job.bytes_done = target.stat().st_size
@@ -361,7 +461,10 @@ if PromptServer is not None:
         active = DOWNLOADER.find_active(target)
         if active is not None:
             return web.json_response({"job": active.to_dict()}, status=202)
-        job = DOWNLOADER.submit(DownloadJob(url, folder, filename, target, sha256, token))
+        try:
+            job = DOWNLOADER.submit(DownloadJob(url, folder, filename, target, sha256, token))
+        except RuntimeError as exc:
+            return _json_error(429, str(exc))
         return web.json_response({"job": job.to_dict()}, status=202)
 
     @routes.get("/news-generator/models/jobs")
@@ -379,6 +482,8 @@ if PromptServer is not None:
 
     @routes.post("/news-generator/models/jobs/{job_id}/cancel")
     async def cancel_job(request):
+        if not _authorized(request):
+            return _json_error(401, "X-Helper-Token missing or wrong")
         job = DOWNLOADER.cancel(request.match_info["job_id"])
         if job is None:
             return _json_error(404, "job not found")

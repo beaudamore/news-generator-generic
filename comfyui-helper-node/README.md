@@ -23,7 +23,10 @@ the app reloads it.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NEWS_GENERATOR_DOWNLOAD_ALLOWED_HOSTS` | `huggingface.co,hf.co,civitai.com` | Hosts a download URL may point at (redirects to CDNs are followed) |
+| `NEWS_GENERATOR_HELPER_TOKEN` | — | When set, the download and cancel routes require it as the `X-Helper-Token` header (the app sends `COMFYUI_HELPER_TOKEN`). Set it on any host reachable by more than the app: ComfyUI's port has no authentication of its own |
+| `NEWS_GENERATOR_DOWNLOAD_ALLOWED_HOSTS` | `huggingface.co,hf.co,civitai.com` | Hosts a download URL may point at. Redirects are followed only to https, and the Authorization header is dropped when a redirect leaves the original host |
+| `NEWS_GENERATOR_DOWNLOAD_MAX_GB` | `80` | Largest file accepted |
+| `NEWS_GENERATOR_DOWNLOAD_MIN_FREE_GB` | `5` | Space that must stay free on the target disk after the download |
 | `HF_TOKEN` / `HUGGINGFACE_TOKEN` | — | Used for Hugging Face URLs when the request carries no token (gated repos) |
 | `CIVITAI_API_TOKEN` | — | Used for Civitai URLs when the request carries no token |
 
@@ -35,8 +38,9 @@ in the app's `.env`), which is simpler than configuring every ComfyUI host.
 ```
 GET  /news-generator/helper                      name, version, known model folders, allowed hosts
 GET  /news-generator/models/files/{folder}       files ComfyUI sees in that models folder
-POST /news-generator/models/download             {"url","folder","filename","sha256"?,"token"?,"subfolder"?,"overwrite"?}
-                                                 202 {"job"} queued or already running; 200 {"job": {"status":"exists"}} when present
+POST /news-generator/models/download             {"url","folder","filename","sha256"?,"token"?,"subfolder"?}
+                                                 202 {"job"} queued or already running; 200 {"job": {"status":"exists"}} when present;
+                                                 400 for a non-model folder, a non-model extension or a host not allowed; 429 when 32 jobs wait
 GET  /news-generator/models/jobs                 every job this process has seen (bounded)
 GET  /news-generator/models/jobs/{id}            one job
 POST /news-generator/models/jobs/{id}/cancel
@@ -47,10 +51,14 @@ Job shape: `{"id","status","url","folder","filename","path","bytes_done","bytes_
 `queued`, `downloading`, `verifying`, `done`, `exists`, `failed`, `cancelled`.
 
 Downloads run one at a time, write `<filename>.part`, resume with a Range request if a
-`.part` is left from an interrupted run, verify `sha256` when given, then rename into
-place. The folder name is a ComfyUI models folder (`checkpoints`, `diffusion_models`,
-`text_encoders`, `vae`, `loras`, `latent_upscale_models`, `audio_encoders`, ...); the file
-lands in the first configured path for that folder, which honours `extra_model_paths.yaml`.
+`.part` from the same URL is left from an interrupted run, verify `sha256` when given, then
+rename into place. An existing file is never replaced: delete it on the host first. The
+folder must be one of the model folders (`checkpoints`, `diffusion_models` or `unet`,
+`text_encoders` or `clip`, `vae`, `loras`, `latent_upscale_models`, `upscale_models`,
+`audio_encoders`, `controlnet`, `clip_vision`, `embeddings`, ...), never `custom_nodes` or
+anything else ComfyUI runs code from, and the filename must have a model extension
+(`.safetensors`, `.gguf`, `.ckpt`, `.pt`, `.pth`, `.bin`, `.sft`, `.onnx`). The file lands in
+the first configured path for that folder, which honours `extra_model_paths.yaml`.
 
 ## Try it
 

@@ -46,6 +46,7 @@ class FakeRequests:
     def __init__(self, routes: dict[tuple[str, str], Any]) -> None:
         self.routes = routes
         self.posts: list[tuple[str, Any]] = []
+        self.post_headers: list[dict[str, Any]] = []
         self.gets: list[str] = []
 
     def _lookup(self, method: str, url: str) -> FakeResponse:
@@ -59,8 +60,9 @@ class FakeRequests:
         self.gets.append(url)
         return self._lookup("GET", url)
 
-    def post(self, url: str, json: Any = None, **_: Any) -> FakeResponse:  # noqa: A002
+    def post(self, url: str, json: Any = None, headers: Any = None, **_: Any) -> FakeResponse:  # noqa: A002
         self.posts.append((url, json))
+        self.post_headers.append(headers or {})
         return self._lookup("POST", url)
 
 
@@ -179,10 +181,20 @@ def test_audit_reports_files_missing_without_manifest_entry_as_unknown(monkeypat
     assert {m["filename"]: m["folder"] for m in result["models"]}["video_vae.safetensors"] == "vae"  # heuristic folder
 
 
-def test_audit_matches_file_inside_a_subfolder_option(monkeypatch: pytest.MonkeyPatch, template_path: Path) -> None:
+def test_audit_requires_the_exact_relative_path(monkeypatch: pytest.MonkeyPatch, template_path: Path) -> None:
+    """ComfyUI offers paths relative to the models folder; a file in a subfolder is a different choice."""
     use(monkeypatch, FakeRequests(object_info_routes({"checkpoints": ["ltx/big-model-fp8.safetensors"], "loras": ["speed.safetensors"], "vae": ["video_vae.safetensors"]})))
     result = cm.audit(HOST, template_path, manifest=MANIFEST)
-    assert result["ok"] is True
+    assert result["missing"] == ["big-model-fp8.safetensors"]
+
+
+def test_audit_queries_each_loader_class_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    template = {**TEMPLATE, "9": {"class_type": "VAELoader", "inputs": {"vae_name": "audio_vae.safetensors"}}}
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps(template), encoding="utf-8")
+    fake = use(monkeypatch, FakeRequests(object_info_routes({"checkpoints": ["big-model-fp8.safetensors"], "loras": ["speed.safetensors"], "vae": ["video_vae.safetensors", "audio_vae.safetensors"]})))
+    assert cm.audit(HOST, path, manifest=MANIFEST, use_cache=False)["ok"] is True
+    assert len(fake.gets) == 3  # three classes, four references
 
 
 def test_audit_reports_uninstalled_node_class_and_falls_back_to_folder_listing(monkeypatch: pytest.MonkeyPatch, template_path: Path) -> None:
@@ -226,6 +238,7 @@ def helper_routes() -> dict[tuple[str, str], Any]:
 
 def test_ensure_starts_helper_downloads_for_missing_manifest_models(monkeypatch: pytest.MonkeyPatch, template_path: Path) -> None:
     monkeypatch.setenv("COMFYUI_HF_TOKEN", "hf_test")
+    monkeypatch.setenv("COMFYUI_HELPER_TOKEN", "shared-secret")
     routes = {**object_info_routes({"checkpoints": [], "loras": [], "vae": ["video_vae.safetensors"]}), **helper_routes()}
     fake = use(monkeypatch, FakeRequests(routes))
     result = cm.ensure(HOST, template_path, download=True, manifest=MANIFEST)
@@ -237,6 +250,7 @@ def test_ensure_starts_helper_downloads_for_missing_manifest_models(monkeypatch:
     }
     assert "sha256" not in bodies["speed.safetensors"]
     assert result["errors"] == []
+    assert all(h.get("X-Helper-Token") == "shared-secret" for h in fake.post_headers)
 
 
 def test_ensure_without_download_only_audits(monkeypatch: pytest.MonkeyPatch, template_path: Path) -> None:
@@ -313,6 +327,7 @@ def test_preflight_detail_starts_downloads_when_auto_enabled(monkeypatch: pytest
     assert status == "fail"
     assert "download started via helper" in detail
     assert len(fake.posts) == 1 and fake.posts[0][1]["filename"] == "big-model-fp8.safetensors"
+    assert sum("/object_info/" in u for u in fake.gets) == 3  # the audit is not repeated for the download step
 
 
 # ----------------------------------------------------------------------------- configured targets

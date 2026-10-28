@@ -197,27 +197,36 @@ def check_comfyui_video(anchor_path: Optional[Path]) -> Check:
 
 
 def check_comfyui_models(host: str) -> Check:
-    """Hard: the configured template for that host names a model file the ComfyUI host does not have.
+    """Hard: a configured template for that host names a model file the ComfyUI host does not have.
 
-    Reads each loader node's choices from the host (GET /object_info/{class}); with
-    COMFYUI_AUTO_DOWNLOAD_MODELS=true it also queues the missing manifest models for download
-    (see services/comfyui_models.py) so the next run finds them in place.
+    "video" checks VIDEO_COMFYUI_WORKFLOW; "avatar" checks AVATAR_COMFYUI_WORKFLOW and
+    HERO_COMFYUI_WORKFLOW. Reads each loader node's choices from the host (one GET
+    /object_info/{class} per loader class); with COMFYUI_AUTO_DOWNLOAD_MODELS=true it also
+    queues the missing manifest models for download (see services/comfyui_models.py) so the
+    next run finds them in place.
     """
 
     def body() -> tuple[str, str]:
         from services import comfyui_models
 
         base_env = "VIDEO_COMFYUI_BASE_URL" if host == "video" else "AVATAR_COMFYUI_BASE_URL"
-        workflow_env = "VIDEO_COMFYUI_WORKFLOW" if host == "video" else "AVATAR_COMFYUI_WORKFLOW"
-        base = _env(base_env).rstrip("/")
-        if not base:
+        if not _env(base_env):
             return "fail", f"{base_env} not set"
-        if not _env(workflow_env):
-            return "fail", f"{workflow_env} not set"
-        path = comfyui_models.resolve_workflow(_env(workflow_env), avatar=host == "avatar")
-        if not path.is_file():
-            return "fail", f"workflow template missing: {path}"
-        return comfyui_models.preflight_detail(base, path)
+        targets = comfyui_models.configured_targets(host)
+        if not targets:
+            return "fail", f"{'VIDEO' if host == 'video' else 'AVATAR'}_COMFYUI_WORKFLOW not set"
+        status, details = "ok", []
+        for target in targets:
+            path = target["workflow"]
+            if not path.is_file():
+                status = "fail"
+                details.append(f"{path.name}: template missing at {path}")
+                continue
+            one_status, detail = comfyui_models.preflight_detail(target["base_url"], path)
+            if one_status == "fail":
+                status = "fail"
+            details.append(f"{path.name}: {detail}")
+        return status, "; ".join(details)
 
     return _timed(f"comfyui_{host}_models", body)
 

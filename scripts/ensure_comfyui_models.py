@@ -64,8 +64,8 @@ def print_target(target: dict) -> None:
         print(f"   error: {err.get('filename') or ''} {err['message']}")
 
 
-def wait_for_jobs(host: str | None, poll_seconds: float) -> bool:
-    """Poll the hosts until no job is queued, downloading, or verifying. Returns True when none failed."""
+def wait_for_jobs(host: str | None, poll_seconds: float, job_ids: set[str]) -> bool:
+    """Poll the hosts until none of the given jobs is queued, downloading, or verifying. Returns True when none of them failed."""
     all_ok = True
     while True:
         report = comfyui_models.jobs_configured(host)
@@ -73,6 +73,8 @@ def wait_for_jobs(host: str | None, poll_seconds: float) -> bool:
         lines = []
         for entry in report["hosts"]:
             for job in entry.get("jobs") or []:
+                if job.get("id") not in job_ids:
+                    continue
                 if job["status"] in ("queued", "downloading", "verifying"):
                     active.append(job)
                     pct = f"{job['percent']:.1f}%" if job.get("percent") is not None else "?"
@@ -119,8 +121,9 @@ def main() -> int:
         for target in result["targets"]:
             print_target(target)
     ok = result["ok"]
-    if args.download and args.wait and any(t.get("started") for t in result["targets"]):
-        finished_ok = wait_for_jobs(args.host, args.poll_seconds)
+    started_ids = {j.get("id") for t in result["targets"] for j in (t.get("started") or []) if j.get("id")}
+    if args.download and args.wait and started_ids:
+        finished_ok = wait_for_jobs(args.host, args.poll_seconds, started_ids)
         after = comfyui_models.audit_configured(args.host, args.workflow)
         if not args.json:
             print("\nafter downloads:")

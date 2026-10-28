@@ -143,6 +143,51 @@ def test_gated_url_needs_token(helper, server, tmp_path: Path) -> None:
     assert allowed.status == "done", allowed.error
 
 
+def test_resume_is_bound_to_the_url(helper, server, tmp_path: Path) -> None:
+    """A .part left by a different URL is discarded instead of being appended to."""
+    target = tmp_path / "model.bin"
+    part = target.with_name("model.bin.part")
+    part.write_bytes(b"garbage from somewhere else")
+    part.with_name(part.name + ".url").write_text("https://other.example/old")
+    job = helper.DownloadJob(f"{server}/model.bin", "checkpoints", "model.bin", target, hashlib.sha256(PAYLOAD).hexdigest(), None)
+    helper.Downloader().submit(job)
+    wait(job)
+    assert job.status == "done", job.error
+    assert target.read_bytes() == PAYLOAD
+
+
+def test_size_cap_refuses_large_files(helper, server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEWS_GENERATOR_DOWNLOAD_MAX_GB", str(0.5 * len(PAYLOAD) / 1024**3))
+    target = tmp_path / "model.bin"
+    job = helper.DownloadJob(f"{server}/model.bin", "checkpoints", "model.bin", target, None, None)
+    helper.Downloader().submit(job)
+    wait(job)
+    assert job.status == "failed" and "MAX_GB" in job.error
+    assert not target.exists()
+
+
+def test_queue_is_bounded(helper, tmp_path: Path) -> None:
+    downloader = helper.Downloader()
+    downloader._ensure_thread = lambda: None  # never start the worker; just fill the queue
+    for i in range(helper.MAX_QUEUED):
+        downloader.submit(helper.DownloadJob("https://huggingface.co/a/b/resolve/main/c.safetensors", "loras", f"{i}.safetensors", tmp_path / f"{i}.safetensors", None, None))
+    with pytest.raises(RuntimeError, match="queue full"):
+        downloader.submit(helper.DownloadJob("https://huggingface.co/a/b/resolve/main/c.safetensors", "loras", "x.safetensors", tmp_path / "x.safetensors", None, None))
+
+
+def test_redirects_drop_authorization_across_hosts_and_refuse_http(helper) -> None:
+    import urllib.request
+    handler = helper._SafeRedirects()
+    req = urllib.request.Request("https://huggingface.co/a/b/resolve/main/c.safetensors", headers={"Authorization": "Bearer secret", "User-Agent": "x"})
+    same = handler.redirect_request(req, None, 302, "Found", {}, "https://huggingface.co/other")
+    assert same.get_header("Authorization") == "Bearer secret"
+    other = handler.redirect_request(req, None, 302, "Found", {}, "https://cas-bridge.xethub.hf.co/signed")
+    assert other.get_header("Authorization") is None
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(req, None, 302, "Found", {}, "http://huggingface.co/plain")
+
+
 def test_cancel_queued_job(helper, tmp_path: Path) -> None:
     downloader = helper.Downloader()
     job = helper.DownloadJob("https://huggingface.co/x/y/resolve/main/z.safetensors", "loras", "z.safetensors", tmp_path / "z.safetensors", None, None)
@@ -167,8 +212,21 @@ def test_allowed_hosts(helper, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_target_stays_inside_models_folder(helper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "models" / "loras"
     root.mkdir(parents=True)
-    fake = types.SimpleNamespace(folder_names_and_paths={"loras": ([str(root)], set())}, get_folder_paths=lambda f: [str(root)] if f == "loras" else [])
+    nodes = tmp_path / "custom_nodes"
+    nodes.mkdir()
+    table = {"loras": [str(root)], "custom_nodes": [str(nodes)], "diffusion_models": [str(tmp_path / "models" / "unet")]}
+    fake = types.SimpleNamespace(folder_names_and_paths={k: (v, set()) for k, v in table.items()},
+                                 get_folder_paths=lambda f: table.get("diffusion_models" if f == "unet" else f, []))
     monkeypatch.setattr(helper, "folder_paths", fake)
+    # folders ComfyUI executes from are refused even though folder_paths knows them
+    with pytest.raises(ValueError, match="not a model folder"):
+        helper.resolve_target("custom_nodes", "evil.safetensors")
+    # only model file types
+    for bad_name in ("evil.py", "x.sh", "x.json", "x"):
+        with pytest.raises(ValueError, match="must end with"):
+            helper.resolve_target("loras", bad_name)
+    # the legacy folder name resolves through get_folder_paths' mapping
+    assert helper.resolve_target("unet", "m.gguf").parent == (tmp_path / "models" / "unet").resolve()
     assert helper.resolve_target("loras", "x.safetensors") == (root / "x.safetensors").resolve()
     assert helper.resolve_target("loras", "x.safetensors", "ltx/sub") == (root / "ltx" / "sub" / "x.safetensors").resolve()
     for bad in ("../x.safetensors", "a/b.safetensors", "", ".."):
