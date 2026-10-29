@@ -134,7 +134,7 @@ VOICE_STORAGE_PATH=assets/voices
 
 The standalone `scripts/generate_video_comfyui.py` reads its own `COMFYUI_BASE_URL`, `COMFYUI_DEFAULT_WORKFLOW`, `COMFYUI_DEFAULT_FPS`, `COMFYUI_DEFAULT_OUTPUT_PREFIX` and `COMFYUI_DEFAULT_TIMEOUT_SECONDS`; the pipeline does not use those.
 
-`VIDEO_COMFYUI_BASE_URL` and `AVATAR_COMFYUI_BASE_URL` are intentionally separate. Video generation can target the heavier DGX ComfyUI instance, while avatar generation can target a lighter local ComfyUI instance that has the turbo image workflow available.
+`VIDEO_COMFYUI_BASE_URL` and `AVATAR_COMFYUI_BASE_URL` are intentionally separate because the two jobs can need different ComfyUI instances. The int8 Qwen Image 2.1 templates (`image_qwen_image_2_1.json`) need the `comfy-kitchen` version pinned in ComfyUI's own `requirements.txt`; on an older `comfy-kitchen` the KSampler fails with `int8_linear() got an unexpected keyword argument 'input_act_weight'`. If the video instance is held at an older `comfy-kitchen` for its own workflow, run a second ComfyUI from a separate venv on another port (the DGX Spark setup is 8188 for video, 8189 for avatar and hero images) and point `AVATAR_COMFYUI_BASE_URL` at that one. Both URLs are read once at startup; restart the API after changing either.
 
 `NEWS_OUTPUT_DIRECTORY` may be absolute or project-relative. Relative values resolve from the repository root.
 
@@ -292,7 +292,7 @@ ComfyUI is intentionally not bundled into this Compose stack. Install ComfyUI on
 
 ```text
 VIDEO_COMFYUI_BASE_URL=http://your-comfyui-host:8188
-AVATAR_COMFYUI_BASE_URL=http://your-comfyui-host:8188
+AVATAR_COMFYUI_BASE_URL=http://your-comfyui-host:8189   # may be the same instance as video; see the note under Configuration
 ```
 
 The app only sends API workflow JSON, uploads the input image/audio, waits for ComfyUI history, and downloads the output. The ComfyUI server must already have the custom nodes and models required by the selected workflow.
@@ -1090,7 +1090,7 @@ npm install
 npm run build      # writes web/dist; the API picks it up on next start
 ```
 
-Develop with hot reload (Vite on :5173 proxying `/api`, `/health`, `/mcp` and `/voices` to the API on :8020, so start uvicorn with `--port 8020` for dev):
+Develop with hot reload (Vite on :5173, bound to all interfaces so it is reachable over Tailscale as `http://<tailscale-ip>:5173/admin/`, proxying `/api`, `/health`, `/mcp` and `/voices` to the API on :8020, so start uvicorn with `--port 8020` for dev):
 
 ```bash
 cd web

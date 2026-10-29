@@ -11,7 +11,7 @@ The app itself is CPU-only and portable. All heavy work happens on external HTTP
 | Reranker (llama.cpp, vLLM, TEI) | `NEWS_CONTEXT_RERANK_*` | optional evidence reranking |
 | TTS server (OpenAI-compatible, Qwen3-TTS) | `TTS_OPENAI_BASE_URL`, `TTS_OPENAI_MODEL` | narration audio and the voice library |
 | ComfyUI (video) | `VIDEO_COMFYUI_BASE_URL`, `VIDEO_COMFYUI_WORKFLOW` | LTX-2.3 talking-head video; the workflow must be the official IA2V template, see README "Video Workflow" |
-| ComfyUI (avatar, optional) | `AVATAR_COMFYUI_BASE_URL` | Z-Image-Turbo avatar generation |
+| ComfyUI (avatar, optional) | `AVATAR_COMFYUI_BASE_URL` | avatar and per-segment hero images (Z-Image-Turbo or Qwen Image 2.1 templates) |
 
 ## Phase 0 — Python environment
 
@@ -45,7 +45,7 @@ Notes:
 
 - `OPENAI_MODEL` must be a model that actually exists on your LLM server (`ollama list` / your server's `/v1/models`).
 - `NEWS_CONTEXT_RERANK_ENABLED=true` only after the reranker (Phase 3) is running.
-- `AVATAR_COMFYUI_BASE_URL` may point to a different, lighter ComfyUI instance than `VIDEO_COMFYUI_BASE_URL`.
+- `AVATAR_COMFYUI_BASE_URL` may point to a different ComfyUI instance than `VIDEO_COMFYUI_BASE_URL`. The int8 Qwen Image 2.1 templates need the `comfy-kitchen` version from ComfyUI's `requirements.txt`; if the video instance is pinned older, run a second ComfyUI from its own venv on another port (DGX Spark: `comfyui.service` on 8188 for video, `comfyui-qwen.service` on 8189 for images). A wrong port or a stopped instance surfaces in the admin UI as a bare 500; the real error is in that instance's `/history?max_items=3`.
 
 ## Phase 2 — Verify external endpoints
 
@@ -57,7 +57,7 @@ Every URL in `.env` must answer before testing the app. Quick probe:
 'SearXNG=http://localhost:8888/config',
 'TTS=http://your-tts-host:8184/v1/audio/voices',
 'VideoComfyUI=http://your-gpu-host:8188/system_stats',
-'AvatarComfyUI=http://your-avatar-host:8188/system_stats',
+'AvatarComfyUI=http://your-avatar-host:8189/system_stats',
 'Reranker=http://127.0.0.1:8033/health' |
 ForEach-Object { $n,$u = $_ -split '=',2
   try { $r = Invoke-WebRequest $u -TimeoutSec 5 -UseBasicParsing; "OK    $n [$($r.StatusCode)]" }
